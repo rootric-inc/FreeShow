@@ -3,6 +3,16 @@ export type StyleInput = {
     type: string
 }
 
+export type StylePasteTarget = {
+    index: number
+    value: any
+}
+
+export type StylePasteGroup = {
+    items: number[]
+    values: any[]
+}
+
 function isPlainObject(value: unknown): value is Record<string, any> {
     return typeof value === "object" && value !== null && !Array.isArray(value) && Object.prototype.toString.call(value) === "[object Object]"
 }
@@ -71,10 +81,9 @@ export function copyStyleValues(item: Record<string, any> | null | undefined, in
 
             const [root, leaf] = parts
             const rootValue = item[root]
-            if (!isPlainObject(rootValue)) continue
 
             if (!isPlainObject(keyValues[root])) keyValues[root] = {}
-            const leafValue = rootValue[leaf]
+            const leafValue = isPlainObject(rootValue) ? rootValue[leaf] : undefined
             keyValues[root][leaf] = leafValue === undefined || leafValue === null ? null : cloneValue(leafValue)
         } else if (item[input.id] !== undefined) {
             keyValues[input.id] = cloneValue(item[input.id])
@@ -97,4 +106,37 @@ export function mergeStyleValues(target: any, copied: any, mergeLeaves = false):
     }
 
     return cloneValue(copied)
+}
+
+export function getStylePasteGroups(targets: readonly StylePasteTarget[], copied: any, mergeLeaves = false): StylePasteGroup[] {
+    if (!targets.length) return []
+
+    if (!mergeLeaves || !isPlainObject(copied)) {
+        return [
+            {
+                items: targets.map((target) => target.index),
+                values: targets.map((target) => mergeStyleValues(target.value, copied, mergeLeaves))
+            }
+        ]
+    }
+
+    // The item setter falls back to values[0] when a saved previous value is null on undo,
+    // so targets with a root object and targets without one cannot share a history entry.
+    const withRoot: StylePasteGroup = { items: [], values: [] }
+    const withoutRoot: StylePasteGroup = { items: [], values: [] }
+
+    for (const target of targets) {
+        const hasRoot = isPlainObject(target.value)
+        const merged = mergeStyleValues(target.value, copied, true)
+        if (!hasRoot && !Object.keys(merged).length) continue
+
+        const group = hasRoot ? withRoot : withoutRoot
+        group.items.push(target.index)
+        group.values.push(merged)
+    }
+
+    const groups: StylePasteGroup[] = []
+    if (withRoot.items.length) groups.push(withRoot)
+    if (withoutRoot.items.length) groups.push(withoutRoot)
+    return groups
 }
