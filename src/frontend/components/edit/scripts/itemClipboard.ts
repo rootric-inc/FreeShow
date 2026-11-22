@@ -9,7 +9,8 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
-import { copyStyleValues, mergeStyleValues } from "./styleValues"
+import { copyStyleValues, getStyleLeafRoots, mergeStyleValues, withExtraStyleLeaves } from "./styleValues"
+import type { StyleInput } from "./styleValues"
 
 type StyleClipboard = {
     keys: { [key: string]: any }
@@ -105,6 +106,7 @@ export function getFilterStyle(): StyleClipboard {
 
 export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: ItemType) {
     const itemKeys = getItemKeys(true)
+    const leafRoots = getStyleLeafRoots(getBoxStyleInputs(type))
 
     for (const slide of slides) {
         updateSlideStyle(slide)
@@ -128,7 +130,8 @@ export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: I
         // item keys
         Object.keys(style.keys).forEach((key) => {
             const value = style.keys[key]
-            const keyValues = items.map((itemIndex) => mergeStyleValues(slide.items[itemIndex]?.[key], value))
+            const mergeLeaves = leafRoots.has(key)
+            const keyValues = items.map((itemIndex) => mergeStyleValues(slide.items[itemIndex]?.[key], value, mergeLeaves))
             history({
                 id: "setItems",
                 newData: { style: { key, values: keyValues } },
@@ -334,10 +337,16 @@ export function getItemKeys(isBox = false) {
     return itemKeys
 }
 
-function getSpecialBoxValues(item: Item) {
-    const inputs = Object.values(itemBoxes[item.type || "text"]?.sections || {})
+const extraStyleLeaves = ["cropping.type"]
+
+function getBoxStyleInputs(type?: ItemType): StyleInput[] {
+    const inputs = Object.values(itemBoxes[type || "text"]?.sections || {})
         .map((a) => a.inputs.flat())
         .flat()
 
-    return copyStyleValues(item, inputs)
+    return withExtraStyleLeaves(inputs, extraStyleLeaves)
+}
+
+function getSpecialBoxValues(item: Item) {
+    return copyStyleValues(item, getBoxStyleInputs(item.type))
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { copyStyleValues, mergeStyleValues, type StyleInput } from "./styleValues"
+import { copyStyleValues, getStyleLeafRoots, mergeStyleValues, withExtraStyleLeaves } from "./styleValues"
+import type { StyleInput } from "./styleValues"
 
 const chartInputs: StyleInput[] = [
     { id: "chart.type", type: "dropdown" },
@@ -14,6 +15,19 @@ const cameraInputs: StyleInput[] = [
     { id: "flippedY", type: "checkbox" },
     { id: "cropping.top", type: "number" },
     { id: "filter", type: "number" }
+]
+
+const croppingInputs: StyleInput[] = [
+    { id: "cropping.top", type: "number" },
+    { id: "cropping.right", type: "number" },
+    { id: "cropping.bottom", type: "number" },
+    { id: "cropping.left", type: "number" }
+]
+
+const specialStyleInputs: StyleInput[] = [
+    { id: "specialStyle.lineGap", type: "number" },
+    { id: "specialStyle.lineBg", type: "color" },
+    { id: "specialStyle.lineRadius", type: "number" }
 ]
 
 const qrCodeInputs: StyleInput[] = [
@@ -35,14 +49,30 @@ describe("copyStyleValues", () => {
         })
     })
 
-    it("copies falsy leaf values and omits roots with no copied leaves", () => {
+    it("copies falsy leaf values and marks unset declared leaves as null when the root exists", () => {
         const withZero = { chart: { holeSize: 0, data: "a,b\n1,2" } }
         expect(copyStyleValues(withZero, chartInputs)).toEqual({
-            chart: { holeSize: 0 }
+            chart: { type: null, holeSize: 0 }
         })
 
         const dataOnly = { chart: { data: "a,b\n1,2" } }
-        expect(copyStyleValues(dataOnly, chartInputs)).toEqual({})
+        expect(copyStyleValues(dataOnly, chartInputs)).toEqual({
+            chart: { type: null, holeSize: null }
+        })
+    })
+
+    it("copies nothing for a root when the source has no root object", () => {
+        expect(copyStyleValues({ type: "chart" }, chartInputs)).toEqual({})
+        expect(copyStyleValues({ chart: undefined }, chartInputs)).toEqual({})
+        expect(copyStyleValues({ chart: null }, chartInputs)).toEqual({})
+    })
+
+    it("treats a null source leaf as unset", () => {
+        const item = { chart: { type: "pie", holeSize: null, data: "x" } }
+
+        expect(copyStyleValues(item, chartInputs)).toEqual({
+            chart: { type: "pie", holeSize: null }
+        })
     })
 
     it("skips plain popup inputs while copying other plain ids", () => {
@@ -122,34 +152,137 @@ describe("copyStyleValues", () => {
     })
 })
 
+describe("getStyleLeafRoots", () => {
+    it("returns roots of non-popup dotted inputs only", () => {
+        const inputs: StyleInput[] = [
+            { id: "style", type: "color" },
+            { id: "textFit", type: "dropdown" },
+            { id: "device", type: "popup" },
+            { id: "chart.type", type: "dropdown" },
+            { id: "chart.holeSize", type: "number" },
+            { id: "chart.data", type: "popup" },
+            { id: "contentOnly.music", type: "popup" },
+            { id: ".leading", type: "string" },
+            { id: "trailing.", type: "string" }
+        ]
+
+        expect(getStyleLeafRoots(inputs)).toEqual(new Set(["chart"]))
+    })
+})
+
+describe("withExtraStyleLeaves", () => {
+    it("appends cropping.type when cropping inputs exist without mutating the source list", () => {
+        const original = [...croppingInputs]
+        const expanded = withExtraStyleLeaves(croppingInputs, ["cropping.type"])
+
+        expect(croppingInputs).toEqual(original)
+        expect(expanded.map((a) => a.id)).toEqual(["cropping.top", "cropping.right", "cropping.bottom", "cropping.left", "cropping.type"])
+        expect(withExtraStyleLeaves(expanded, ["cropping.type"]).map((a) => a.id)).toEqual(expanded.map((a) => a.id))
+    })
+
+    it("does not append extra leaves when their root has no non-popup dotted input", () => {
+        expect(withExtraStyleLeaves(chartInputs, ["cropping.type"])).toEqual(chartInputs)
+        expect(withExtraStyleLeaves([{ id: "cropping.mode", type: "popup" }], ["cropping.type"])).toEqual([{ id: "cropping.mode", type: "popup" }])
+    })
+
+    it("preserves cropping.type when copying a clipped media item onto an uncropped item", () => {
+        const inputs = withExtraStyleLeaves(croppingInputs, ["cropping.type"])
+        const source = { cropping: { left: 20, right: 20, top: 0, bottom: 0, type: "clip" } }
+        const copied = copyStyleValues(source, inputs)
+
+        expect(copied).toEqual({
+            cropping: { top: 0, right: 20, bottom: 0, left: 20, type: "clip" }
+        })
+
+        const merged = mergeStyleValues(undefined, copied.cropping, true)
+        expect(merged).toEqual({ top: 0, right: 20, bottom: 0, left: 20, type: "clip" })
+        expect(copyStyleValues({ cropping: merged }, inputs)).toEqual(copied)
+    })
+})
+
 describe("mergeStyleValues", () => {
     it("merges copied leaves into the target root while keeping uncopied leaves", () => {
         const target = { type: "bar", holeSize: 0, data: "target-data" }
         const copied = { type: "pie", holeSize: 40 }
 
-        const merged = mergeStyleValues(target, copied)
+        const merged = mergeStyleValues(target, copied, true)
 
         expect(merged).toEqual({ type: "pie", holeSize: 40, data: "target-data" })
         expect(target).toEqual({ type: "bar", holeSize: 0, data: "target-data" })
     })
 
-    it("creates a new object with just the copied leaves when target has no root object", () => {
+    it("resets unset source leaves on the target while keeping target content", () => {
+        const copied = copyStyleValues({ chart: { type: "pie", data: "x" } }, chartInputs)
+        expect(copied).toEqual({ chart: { type: "pie", holeSize: null } })
+
+        const target = { type: "pie", holeSize: 50, data: "y" }
+        const merged = mergeStyleValues(target, copied.chart, true)
+
+        expect(merged).toEqual({ type: "pie", data: "y" })
+        expect("holeSize" in merged).toBe(false)
+        expect(copyStyleValues({ chart: merged }, chartInputs)).toEqual(copied)
+    })
+
+    it("resets unset cropping leaves and matches clipboard after paste", () => {
+        const inputs = withExtraStyleLeaves(croppingInputs, ["cropping.type"])
+        const copied = copyStyleValues({ cropping: { top: 10 } }, inputs)
+        expect(copied).toEqual({
+            cropping: { top: 10, right: null, bottom: null, left: null, type: null }
+        })
+
+        const merged = mergeStyleValues({ left: 20, type: "clip" }, copied.cropping, true)
+
+        expect(merged).toEqual({ top: 10 })
+        expect(copyStyleValues({ cropping: merged }, inputs)).toEqual(copied)
+    })
+
+    it("clears unset specialStyle leaves on the target and matches clipboard after paste", () => {
+        const copied = copyStyleValues({ specialStyle: { lineBg: "#112233" } }, specialStyleInputs)
+        const merged = mergeStyleValues({ lineBg: "#000000", lineGap: 12 }, copied.specialStyle, true)
+
+        expect(merged).toEqual({ lineBg: "#112233" })
+        expect(copyStyleValues({ specialStyle: merged }, specialStyleInputs)).toEqual(copied)
+    })
+
+    it("clears target leaves when the source leaf is null", () => {
+        const copied = copyStyleValues({ chart: { type: "pie", holeSize: null, data: "x" } }, chartInputs)
+        const merged = mergeStyleValues({ type: "bar", holeSize: 50, data: "y" }, copied.chart, true)
+
+        expect(merged).toEqual({ type: "pie", data: "y" })
+        expect(copyStyleValues({ chart: merged }, chartInputs)).toEqual(copied)
+    })
+
+    it("creates a new object with just the set copied leaves when target has no root object", () => {
         const copied = { type: "pie", holeSize: 40 }
 
-        expect(mergeStyleValues(undefined, copied)).toEqual({ type: "pie", holeSize: 40 })
-        expect(mergeStyleValues(null, copied)).toEqual({ type: "pie", holeSize: 40 })
+        expect(mergeStyleValues(undefined, copied, true)).toEqual({ type: "pie", holeSize: 40 })
+        expect(mergeStyleValues(null, copied, true)).toEqual({ type: "pie", holeSize: 40 })
+        expect(mergeStyleValues(undefined, { type: "pie", holeSize: null }, true)).toEqual({ type: "pie" })
     })
 
     it("clones nested copied leaf values so targets do not share references", () => {
         const copied = { parts: ["Soprano", "Alto"] }
-        const targetA = mergeStyleValues({ music: "song-a" }, copied)
-        const targetB = mergeStyleValues({ music: "song-b" }, copied)
+        const targetA = mergeStyleValues({ music: "song-a" }, copied, true)
+        const targetB = mergeStyleValues({ music: "song-b" }, copied, true)
 
         targetA.parts.push("Tenor")
 
         expect(targetA).toEqual({ music: "song-a", parts: ["Soprano", "Alto", "Tenor"] })
         expect(targetB).toEqual({ music: "song-b", parts: ["Soprano", "Alto"] })
         expect(copied.parts).toEqual(["Soprano", "Alto"])
+    })
+
+    it("replaces object values whole when the key is a plain id instead of a leaf root", () => {
+        const target = { a: 1, b: 2 }
+        const copied = { a: 3 }
+
+        const replaced = mergeStyleValues(target, copied, false)
+        replaced.a = 99
+
+        expect(replaced).toEqual({ a: 99 })
+        expect(copied).toEqual({ a: 3 })
+        expect(target).toEqual({ a: 1, b: 2 })
+        expect(mergeStyleValues(target, copied, true)).toEqual({ a: 3, b: 2 })
     })
 
     it("returns plain copied values directly", () => {
