@@ -36,10 +36,16 @@ function isStyleInput(input: StyleInput | null | undefined): input is StyleInput
     return !!input && !!input.id && input.id !== "style" && input.type !== "popup"
 }
 
-function parseDottedId(id: string): [string, string] | null {
+export function parseDottedId(id: string): [string, string] | null {
     const dotIndex = id.indexOf(".")
     if (dotIndex <= 0 || dotIndex === id.length - 1) return null
     return [id.slice(0, dotIndex), id.slice(dotIndex + 1)]
+}
+
+export function setStyleLeaf(target: any, leaf: string, value: any): Record<string, any> {
+    const next: Record<string, any> = isPlainObject(target) ? cloneValue(target) : {}
+    next[leaf] = cloneValue(value)
+    return next
 }
 
 export function getStyleLeafRoots(inputs: readonly StyleInput[]): Set<string> {

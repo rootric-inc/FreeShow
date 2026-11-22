@@ -12,6 +12,7 @@
     import { _show } from "../../helpers/shows"
     import { getStyles } from "../../helpers/style"
     import { MAX_FONT_SIZE } from "../scripts/autosize"
+    import { parseDottedId, setStyleLeaf } from "../scripts/styleValues"
     import { addFilterString, addStyle, addStyleString, getItemStyleAtPos, getItemText, getLastLineAlign, getLineText, getSelectionRange } from "../scripts/textStyle"
     import { itemBoxes, setBoxInputValue } from "../values/boxes"
     import { VideoPlayer } from "../../media/video/videoPlayer"
@@ -387,35 +388,20 @@
         else if (input.key) value = { ...((item as any)?.[input.key] || {}), [input.key]: value }
 
         let targetId = input.id
-        // set nested value
-        if (input.id.includes(".")) {
-            let splitted = input.id.split(".")
-            let item = getSelectedItem()
-            if (!item) return
+        const dotted = typeof input.id === "string" ? parseDottedId(input.id) : null
+        let values: any[] = [value]
 
-            targetId = splitted[0]
+        if (dotted) {
+            const [root, leaf] = dotted
+            targetId = root
 
-            let newValue = item[splitted[0]]
-            if (typeof newValue !== "object" || newValue === null) newValue = {}
-            else newValue = clone(newValue)
+            if (!$activeEdit.id) {
+                let slideId = getLayoutRef()[$activeEdit.slide!]?.id
+                const slideItems = (_show().slides([slideId]).get()[0] as Slide | undefined)?.items
+                if (!slideItems || !allItems.some((i: number) => slideItems[i])) return
 
-            newValue[splitted[1]] = input.value
-            value = newValue
-        }
-
-        function getSelectedItem() {
-            if ($activeEdit.id) {
-                if ($activeEdit.type === "overlay") {
-                    return clone($overlays[$activeEdit.id]?.items?.[allItems[0]])
-                } else if ($activeEdit.type === "template") {
-                    return clone($templates[$activeEdit.id]?.items?.[allItems[0]])
-                }
+                values = allItems.map((i: number) => setStyleLeaf(slideItems[i]?.[root], leaf, input.value))
             }
-
-            let slideId = getLayoutRef()[$activeEdit.slide!]?.id
-            let slide = clone(_show().slides([slideId]).get()[0]) as Slide
-
-            return slide?.items?.[allItems[0]]
         }
 
         if (id === "text") {
@@ -442,7 +428,7 @@
 
         history({
             id: "setItems",
-            newData: { style: { key: targetId, values: [value] } },
+            newData: { style: { key: targetId, values } },
             location: { page: "edit", show: $activeShow!, slide: getLayoutRef()[$activeEdit.slide!]?.id, items: allItems }
         })
 
@@ -453,23 +439,20 @@
 
         function updateItemValues(a: any) {
             if (!a[$activeEdit.id!]?.items) return a
+            if (dotted && !allItems.some((i: number) => a[$activeEdit.id!].items[i])) return a
 
             allItems.forEach((i: number) => {
                 if (!a[$activeEdit.id!].items[i]) return
 
                 delete a[$activeEdit.id!].items[i].autoFontSize
 
-                if (!targetId.includes(".")) {
-                    a[$activeEdit.id!].items[i][targetId] = value
+                if (dotted) {
+                    const [root, leaf] = dotted
+                    a[$activeEdit.id!].items[i][root] = setStyleLeaf(a[$activeEdit.id!].items[i][root], leaf, input.value)
                     return
                 }
 
-                let splitted = targetId.split(".")
-                let nested = a[$activeEdit.id!].items[i][splitted[0]]
-                if (typeof nested !== "object" || nested === null) {
-                    a[$activeEdit.id!].items[i][splitted[0]] = {}
-                }
-                a[$activeEdit.id!].items[i][splitted[0]][splitted[1]] = value
+                a[$activeEdit.id!].items[i][targetId] = value
             })
 
             a[$activeEdit.id!].modified = Date.now()

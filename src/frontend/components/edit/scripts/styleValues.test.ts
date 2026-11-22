@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { copyStyleValues, getStyleLeafRoots, getStylePasteGroups, mergeStyleValues, withExtraStyleLeaves } from "./styleValues"
+import { copyStyleValues, getStyleLeafRoots, getStylePasteGroups, mergeStyleValues, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput, StylePasteGroup } from "./styleValues"
 
 const chartInputs: StyleInput[] = [
@@ -437,5 +437,53 @@ describe("getStylePasteGroups", () => {
 
         expect(getStylePasteGroups(targets, "shrinkToFit", false)).toEqual([{ items: [1, 4], values: ["shrinkToFit", "shrinkToFit"] }])
         expect(getStylePasteGroups([], "shrinkToFit", false)).toEqual([])
+    })
+})
+
+describe("parseDottedId", () => {
+    it("splits valid root.leaf ids and rejects plain or edge-dot ids", () => {
+        expect(parseDottedId("chart.type")).toEqual(["chart", "type"])
+        expect(parseDottedId("textFit")).toBeNull()
+        expect(parseDottedId(".leading")).toBeNull()
+        expect(parseDottedId("trailing.")).toBeNull()
+    })
+})
+
+describe("setStyleLeaf", () => {
+    it("keeps each target's own content when setting one leaf on two targets", () => {
+        const first = { type: "bar", data: "A" }
+        const second = { type: "line", data: "B" }
+
+        const nextFirst = setStyleLeaf(first, "type", "pie")
+        const nextSecond = setStyleLeaf(second, "type", "pie")
+
+        expect(nextFirst).toEqual({ type: "pie", data: "A" })
+        expect(nextSecond).toEqual({ type: "pie", data: "B" })
+        expect(first).toEqual({ type: "bar", data: "A" })
+        expect(second).toEqual({ type: "line", data: "B" })
+    })
+
+    it("creates an object with just the leaf when the target has no root object", () => {
+        expect(setStyleLeaf(undefined, "type", "pie")).toEqual({ type: "pie" })
+        expect(setStyleLeaf(null, "type", "pie")).toEqual({ type: "pie" })
+        expect(setStyleLeaf("invalid", "type", "pie")).toEqual({ type: "pie" })
+    })
+
+    it("preserves null and falsy leaf values", () => {
+        expect(setStyleLeaf({ type: "bar", data: "A" }, "type", null)).toEqual({ type: null, data: "A" })
+        expect(setStyleLeaf({ type: "pie", data: "A" }, "holeSize", 0)).toEqual({ type: "pie", data: "A", holeSize: 0 })
+        expect(setStyleLeaf({ enabled: true }, "enabled", false)).toEqual({ enabled: false })
+        expect(setStyleLeaf({ lineBg: "#ffffff" }, "lineBg", "")).toEqual({ lineBg: "" })
+    })
+
+    it("clones object leaf values so targets do not share references", () => {
+        const parts = ["Soprano"]
+        const first = setStyleLeaf({ music: "A" }, "parts", parts)
+        const second = setStyleLeaf({ music: "B" }, "parts", parts)
+
+        first.parts.push("Alto")
+
+        expect(first).toEqual({ music: "A", parts: ["Soprano", "Alto"] })
+        expect(second).toEqual({ music: "B", parts: ["Soprano"] })
     })
 })

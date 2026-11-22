@@ -3,6 +3,7 @@ import { uid } from "uid"
 import type { LayoutRef } from "../../../types/Show"
 import { activeFocus, activeShow, focusMode, showsCache } from "../../stores"
 import { clone } from "./array"
+import { getItemSetValue } from "./itemValues"
 import { addToPos } from "./mover"
 // import { loadShows } from "./setShow"
 
@@ -195,7 +196,7 @@ export function _show(id = "active") {
                             if (!a[id].slides?.[slideId]) return
                             if (!indexesDefined) indexes = [...Object.keys(shows[id].slides[slideId].items)] as any
                             indexes.forEach((index, i) => {
-                                const value = values[i] || values[0]
+                                const value = getItemSetValue(values, i)
                                 if (key) {
                                     if (!a[id].slides[slideId].items[index]) return
 
