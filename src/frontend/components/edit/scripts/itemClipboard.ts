@@ -9,6 +9,7 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
+import { copyStyleValues, mergeStyleValues } from "./styleValues"
 
 type StyleClipboard = {
     keys: { [key: string]: any }
@@ -28,7 +29,7 @@ export function getBoxStyle(item: Item): StyleClipboard {
     const style = normalText[0]?.style || item.style
     const linesAlign = item.lines?.[0]?.align || ""
 
-    const extraKeyValues: string[] = getSpecialBoxValues(item)
+    const extraKeyValues = getSpecialBoxValues(item)
 
     const itemKeys = getItemKeys(true)
     const newStyles: { [key: string]: number | string } = getStyles(style)
@@ -127,9 +128,10 @@ export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: I
         // item keys
         Object.keys(style.keys).forEach((key) => {
             const value = style.keys[key]
+            const keyValues = items.map((itemIndex) => mergeStyleValues(slide.items[itemIndex]?.[key], value))
             history({
                 id: "setItems",
-                newData: { style: { key, values: [style.keys[key]] } },
+                newData: { style: { key, values: keyValues } },
                 location: { page: "edit", show: get(activeShow)!, slide: slide.id, items }
             })
 
@@ -333,20 +335,9 @@ export function getItemKeys(isBox = false) {
 }
 
 function getSpecialBoxValues(item: Item) {
-    const keyValues: any = {}
-    const inputIds = Object.values(itemBoxes[item.type || "text"]?.sections || {})
+    const inputs = Object.values(itemBoxes[item.type || "text"]?.sections || {})
         .map((a) => a.inputs.flat())
         .flat()
-        .map(({ id }) => id)
 
-    inputIds.forEach((id) => {
-        if (id === "style") return
-
-        if (id.includes(".")) id = id.slice(0, id.indexOf("."))
-        if (item[id] !== undefined) keyValues[id] = item[id]
-    })
-
-    if (item.align) keyValues.align = item.align
-
-    return keyValues
+    return copyStyleValues(item, inputs)
 }
