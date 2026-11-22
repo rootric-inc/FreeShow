@@ -9,6 +9,8 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
+import { copyStyleValues, getStyleLeafRoots, getStylePasteGroups, withExtraStyleLeaves } from "./styleValues"
+import type { StyleInput } from "./styleValues"
 
 type StyleClipboard = {
     keys: { [key: string]: any }
@@ -28,7 +30,7 @@ export function getBoxStyle(item: Item): StyleClipboard {
     const style = normalText[0]?.style || item.style
     const linesAlign = item.lines?.[0]?.align || ""
 
-    const extraKeyValues: string[] = getSpecialBoxValues(item)
+    const extraKeyValues = getSpecialBoxValues(item)
 
     const itemKeys = getItemKeys(true)
     const newStyles: { [key: string]: number | string } = getStyles(style)
@@ -104,6 +106,7 @@ export function getFilterStyle(): StyleClipboard {
 
 export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: ItemType) {
     const itemKeys = getItemKeys(true)
+    const leafRoots = getStyleLeafRoots(getBoxStyleInputs(type))
 
     for (const slide of slides) {
         updateSlideStyle(slide)
@@ -127,10 +130,14 @@ export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: I
         // item keys
         Object.keys(style.keys).forEach((key) => {
             const value = style.keys[key]
-            history({
-                id: "setItems",
-                newData: { style: { key, values: [style.keys[key]] } },
-                location: { page: "edit", show: get(activeShow)!, slide: slide.id, items }
+            const mergeLeaves = leafRoots.has(key)
+            const targets = items.map((index) => ({ index, value: slide.items[index]?.[key] }))
+            getStylePasteGroups(targets, value, mergeLeaves).forEach((group) => {
+                history({
+                    id: "setItems",
+                    newData: { style: { key, values: group.values } },
+                    location: { page: "edit", show: get(activeShow)!, slide: slide.id, items: group.items }
+                })
             })
 
             if (key === "textFit") {
@@ -332,21 +339,16 @@ export function getItemKeys(isBox = false) {
     return itemKeys
 }
 
-function getSpecialBoxValues(item: Item) {
-    const keyValues: any = {}
-    const inputIds = Object.values(itemBoxes[item.type || "text"]?.sections || {})
+const extraStyleLeaves = ["cropping.type"]
+
+function getBoxStyleInputs(type?: ItemType): StyleInput[] {
+    const inputs = Object.values(itemBoxes[type || "text"]?.sections || {})
         .map((a) => a.inputs.flat())
         .flat()
-        .map(({ id }) => id)
 
-    inputIds.forEach((id) => {
-        if (id === "style") return
+    return withExtraStyleLeaves(inputs, extraStyleLeaves)
+}
 
-        if (id.includes(".")) id = id.slice(0, id.indexOf("."))
-        if (item[id] !== undefined) keyValues[id] = item[id]
-    })
-
-    if (item.align) keyValues.align = item.align
-
-    return keyValues
+function getSpecialBoxValues(item: Item) {
+    return copyStyleValues(item, getBoxStyleInputs(item.type))
 }
