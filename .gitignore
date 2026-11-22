@@ -5,6 +5,8 @@
 /node_modules/
 /public/build/
 /public/release.json
+/public/assets/sheet-music/verovio-module.mjs
+/public/assets/sheet-music/verovio.mjs
 /public/*.js.map
 /public/*.ts
 /build/

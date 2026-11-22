@@ -37,6 +37,12 @@ const qrCodeInputs: StyleInput[] = [
     { id: "qr_code.background", type: "color" }
 ]
 
+const sheetMusicInputs: StyleInput[] = [
+    { id: "sheet_music", type: "popup" },
+    { id: "style", type: "color" },
+    { id: "sheet_music.size", type: "number" }
+]
+
 describe("copyStyleValues", () => {
     it("copies only dotted leaves and skips dotted popup inputs", () => {
         const item = {
@@ -158,6 +164,26 @@ describe("copyStyleValues", () => {
 
         expect(copyStyleValues(item, inputs)).toEqual({
             table: { borderColor: "#ffffff", borderWidth: 2 }
+        })
+    })
+
+    it("skips the sheet_music popup input and copies only sheet_music.size", () => {
+        const source = {
+            type: "sheet_music",
+            style: "color: #ffffff;",
+            sheet_music: { data: "<mei>source</mei>", label: "Amazing Grace", size: 125 }
+        }
+
+        const copied = copyStyleValues(source, sheetMusicInputs)
+        expect(copied).toEqual({
+            sheet_music: { size: 125 }
+        })
+
+        const target = { data: "<mei>target</mei>", label: "Be Thou My Vision", size: 100 }
+        expect(mergeStyleValues(target, copied.sheet_music, true)).toEqual({
+            data: "<mei>target</mei>",
+            label: "Be Thou My Vision",
+            size: 125
         })
     })
 })

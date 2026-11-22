@@ -774,5 +774,17 @@ export const itemBoxes: Box2 = {
                 ])
             }
         }
+    },
+    sheet_music: {
+        icon: "music",
+        sections: {
+            default: {
+                inputs: [
+                    [{ type: "popup", id: "sheet_music", value: {}, values: { label: "popup.edit_sheet_music", name: "actions.open_file", icon: "music", popupId: "edit_sheet_music", allowEmpty: false } }],
+                    [{ id: "style", key: "color", type: "color", value: "#ffffff", values: { label: "edit.color", defaultValue: "#ffffff", allowOpacity: true, allowEmpty: true } }],
+                    [{ type: "number", id: "sheet_music.size", value: 100, values: { label: "edit.size", defaultValue: 100, step: 1, min: 50, max: 200, showSlider: true } }]
+                ]
+            }
+        }
     }
 }

@@ -229,7 +229,7 @@
 
     // -----
 
-    const setItemStyle = ["timer", "clock", "icon", "events", "camera", "variable", "web", "slide_tracker", "table"]
+    const setItemStyle = ["timer", "clock", "icon", "events", "camera", "variable", "web", "slide_tracker", "table", "sheet_music"]
 
     const setBox = () => clone(itemBoxes[id])!
     let box = setBox()
@@ -371,6 +371,10 @@
     $: if (id === "chart" && item) {
         setBoxInputValue(box, "default", "chart.holeSize", "hidden", item.chart?.type !== "pie")
         setBoxInputValue(box, "default", "chart.holeSize", "value", item.chart?.holeSize ?? 0)
+    }
+    $: if (id === "sheet_music" && item) {
+        const label = item.sheet_music?.label ? item.sheet_music.label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") : ""
+        setBoxInputValue(box, "default", "sheet_music", "values", { name: label || "actions.open_file" })
     }
     $: if (id === "visualizer" && item) {
         const visualizerType = item.visualizer?.type || "bars"

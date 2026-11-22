@@ -628,14 +628,14 @@ export async function selectFolder(msg: { channel: string; title?: string; path?
 }
 
 // OPEN_FILE
-export async function selectFiles(msg: { id: string; channel: string; title?: string; filter: Electron.FileFilter; multiple: boolean; read?: boolean }) {
+export async function selectFiles(msg: { id: string; channel: string; title?: string; filter: Electron.FileFilter; multiple: boolean; read?: boolean | "base64" }) {
     const files = await selectFilesDialog(msg.title, msg.filter, msg.multiple === undefined ? true : msg.multiple)
     if (!files || !files.length) return
 
     const content: { [key: string]: string } = {}
     if (msg.read) files.forEach(getContent)
     function getContent(filePath: string) {
-        content[filePath] = readFile(filePath)
+        content[filePath] = readFile(filePath, msg.read === "base64" ? "base64" : "utf8")
     }
 
     sendToMain(ToMain.OPEN_FILE2, { channel: msg.channel, id: msg.id, files, content })

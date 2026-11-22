@@ -268,7 +268,7 @@ export interface MainSendPayloads {
     [Main.READ_FOLDER]: { path: string | string[]; depth?: number; generateThumbnails?: boolean; captureFolderContent?: boolean }
     [Main.READ_FILE]: { path: string }
     [Main.OPEN_FOLDER]: { channel: string; title?: string; path?: string }
-    [Main.OPEN_FILE]: { id: string; channel: string; title?: string; filter: any; multiple: boolean; read?: boolean }
+    [Main.OPEN_FILE]: { id: string; channel: string; title?: string; filter: any; multiple: boolean; read?: boolean | "base64" }
     // SYNC
     [Main.CAN_SYNC]?: { id: SyncProviderId }
     [Main.GET_TEAMS]?: { id: SyncProviderId }

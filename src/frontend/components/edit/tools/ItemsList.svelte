@@ -41,6 +41,9 @@
         chart: (item: Item) => {
             return item.chart?.type || ""
         },
+        sheet_music: (item: Item) => {
+            return item.sheet_music?.label || ""
+        },
         table: () => ""
     }
 

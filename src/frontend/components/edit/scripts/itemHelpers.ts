@@ -93,7 +93,17 @@ export function addItem(type: ItemType, id: string | null = null, options: any =
     } else if (type === "variable") newData.variable = { id: "" }
     else if (type === "web") newData.web = { url: "" }
     else if (type === "qr_code") newData.qr_code = { text: "" }
-    else if (type === "captions") newData.captions = { roomId: "freeshow" + uid(6) }
+    else if (type === "sheet_music") {
+        newData.sheet_music = {}
+
+        let style = getStyles(newData.style)
+        style = { ...style, width: "1530px", height: "480px", left: "195px", top: "300px", color: "#ffffff" }
+        let styleString = ""
+        Object.entries(style).forEach(([key, value]) => {
+            styleString += `${key}: ${value};`
+        })
+        newData.style = styleString
+    } else if (type === "captions") newData.captions = { roomId: "freeshow" + uid(6) }
     else if (type === "chart") newData.chart = { type: "bar", data: "" }
     else if (type === "table") {
         newData.table = {
