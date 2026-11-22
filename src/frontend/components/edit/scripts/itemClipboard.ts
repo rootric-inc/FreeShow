@@ -9,7 +9,7 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
-import { copyStyleValues, getStyleLeafRoots, getStylePasteGroups, withExtraStyleLeaves } from "./styleValues"
+import { copyStyleValues, getStyleLeafRoots, getStylePastePlan, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput } from "./styleValues"
 
 type StyleClipboard = {
@@ -132,13 +132,14 @@ export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: I
             const value = style.keys[key]
             const mergeLeaves = leafRoots.has(key)
             const targets = items.map((index) => ({ index, value: slide.items[index]?.[key] }))
-            getStylePasteGroups(targets, value, mergeLeaves).forEach((group) => {
+            const paste = getStylePastePlan(targets, value, mergeLeaves)
+            if (paste) {
                 history({
                     id: "setItems",
-                    newData: { style: { key, values: group.values } },
-                    location: { page: "edit", show: get(activeShow)!, slide: slide.id, items: group.items }
+                    newData: { style: { key, values: paste.values } },
+                    location: { page: "edit", show: get(activeShow)!, slide: slide.id, items: paste.items }
                 })
-            })
+            }
 
             if (key === "textFit") {
                 history({

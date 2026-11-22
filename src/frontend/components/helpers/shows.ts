@@ -198,7 +198,10 @@ export function _show(id = "active") {
                             indexes.forEach((index, i) => {
                                 const value = getItemSetValue(values, i)
                                 if (key) {
-                                    if (!a[id].slides[slideId].items[index]) return
+                                    if (!a[id].slides[slideId].items[index]) {
+                                        prev.values.push(null)
+                                        return
+                                    }
 
                                     if (key.includes(".")) {
                                         const splitted = key.split(".")
