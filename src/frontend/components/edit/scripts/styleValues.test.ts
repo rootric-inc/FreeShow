@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
-import { copyStyleValues, getStyleLeafRoots, getStylePasteGroups, mergeStyleValues, withExtraStyleLeaves } from "./styleValues"
-import type { StyleInput, StylePasteGroup } from "./styleValues"
+import { getItemSetValue } from "../../helpers/itemValues"
+import { copyStyleValues, getStyleLeafRoots, getStylePastePlan, mergeStyleValues, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
+import type { StyleInput, StylePastePlan } from "./styleValues"
 
 const chartInputs: StyleInput[] = [
     { id: "chart.type", type: "dropdown" },
@@ -330,35 +331,33 @@ describe("mergeStyleValues", () => {
     })
 })
 
-function applyItemsSetter(slideItems: Record<string, any>[], key: string, group: StylePasteGroup): StylePasteGroup {
+function applyItemsSetter(slideItems: Record<string, any>[], key: string, plan: StylePastePlan): StylePastePlan {
     const previousValues: any[] = []
-    group.items.forEach((index, i) => {
-        const value = group.values[i] || group.values[0]
+    plan.items.forEach((index, i) => {
+        const value = getItemSetValue(plan.values, i)
         const current = slideItems[index][key]
         previousValues.push(current ? structuredClone(current) : null)
         if (value === undefined) delete slideItems[index][key]
         else slideItems[index][key] = structuredClone(value)
     })
-    return { items: [...group.items], values: previousValues }
+    return { items: [...plan.items], values: previousValues }
 }
 
-describe("getStylePasteGroups", () => {
+describe("getStylePastePlan", () => {
     it("skips rootless chart targets on all-null paste so undo never copies another chart's data", () => {
         const copied = copyStyleValues({ chart: { data: "source" } }, chartInputs)
         const slideItems: Record<string, any>[] = [{ chart: { type: "pie", holeSize: 50, data: "A" } }, {}]
         const targets = slideItems.map((item, index) => ({ index, value: item.chart }))
 
-        const groups = getStylePasteGroups(targets, copied.chart, true)
+        const plan = getStylePastePlan(targets, copied.chart, true)
 
-        expect(groups).toEqual([{ items: [0], values: [{ data: "A" }] }])
+        expect(plan).toEqual({ items: [0], values: [{ data: "A" }] })
 
-        const undoStack = groups.map((group) => applyItemsSetter(slideItems, "chart", group))
+        const undo = applyItemsSetter(slideItems, "chart", plan!)
         expect(slideItems[0]).toEqual({ chart: { data: "A" } })
         expect(slideItems[1]).toEqual({})
 
-        for (const entry of [...undoStack].reverse()) {
-            applyItemsSetter(slideItems, "chart", entry)
-        }
+        applyItemsSetter(slideItems, "chart", undo)
 
         expect(slideItems[0]).toEqual({ chart: { type: "pie", holeSize: 50, data: "A" } })
         expect(slideItems[1]).toEqual({})
@@ -370,48 +369,38 @@ describe("getStylePasteGroups", () => {
         const slideItems: Record<string, any>[] = [{ type: "camera", cropping: { top: 15, type: "clip" } }, { type: "camera" }]
         const targets = slideItems.map((item, index) => ({ index, value: item.cropping }))
 
-        const groups = getStylePasteGroups(targets, copied.cropping, true)
+        const plan = getStylePastePlan(targets, copied.cropping, true)
 
-        expect(groups).toEqual([{ items: [0], values: [{}] }])
+        expect(plan).toEqual({ items: [0], values: [{}] })
 
-        const undoStack = groups.map((group) => applyItemsSetter(slideItems, "cropping", group))
+        const undo = applyItemsSetter(slideItems, "cropping", plan!)
         expect(slideItems[0].cropping).toEqual({})
         expect(slideItems[1].cropping).toBeUndefined()
         expect(copyStyleValues(slideItems[0], inputs)).toEqual(copied)
         expect(copyStyleValues(slideItems[1], inputs)).toEqual(copied)
 
-        for (const entry of [...undoStack].reverse()) {
-            applyItemsSetter(slideItems, "cropping", entry)
-        }
+        applyItemsSetter(slideItems, "cropping", undo)
 
         expect(slideItems[0].cropping).toEqual({ top: 15, type: "clip" })
         expect(slideItems[1].cropping).toBeUndefined()
     })
 
-    it("splits targets with and without a root into separate groups so undo keeps rootless targets clean", () => {
+    it("keeps targets with and without a root in one plan and restores rootless targets to null on undo", () => {
         const copied = copyStyleValues({ chart: { type: "bar", data: "source" } }, chartInputs)
         const slideItems: Record<string, any>[] = [{ chart: { type: "pie", holeSize: 50, data: "A" } }, {}, { chart: { type: "line", data: "C" } }, { chart: null }]
         const targets = slideItems.map((item, index) => ({ index, value: item.chart }))
 
-        const groups = getStylePasteGroups(targets, copied.chart, true)
+        const plan = getStylePastePlan(targets, copied.chart, true)
 
-        expect(groups).toEqual([
-            {
-                items: [0, 2],
-                values: [
-                    { type: "bar", data: "A" },
-                    { type: "bar", data: "C" }
-                ]
-            },
-            { items: [1, 3], values: [{ type: "bar" }, { type: "bar" }] }
-        ])
+        expect(plan).toEqual({
+            items: [0, 1, 2, 3],
+            values: [{ type: "bar", data: "A" }, { type: "bar" }, { type: "bar", data: "C" }, { type: "bar" }]
+        })
 
-        const undoStack = groups.map((group) => applyItemsSetter(slideItems, "chart", group))
+        const undo = applyItemsSetter(slideItems, "chart", plan!)
         expect(slideItems).toEqual([{ chart: { type: "bar", data: "A" } }, { chart: { type: "bar" } }, { chart: { type: "bar", data: "C" } }, { chart: { type: "bar" } }])
 
-        for (const entry of [...undoStack].reverse()) {
-            applyItemsSetter(slideItems, "chart", entry)
-        }
+        applyItemsSetter(slideItems, "chart", undo)
 
         expect(slideItems[0]).toEqual({ chart: { type: "pie", holeSize: 50, data: "A" } })
         expect(slideItems[1]).toEqual({ chart: null })
@@ -419,23 +408,71 @@ describe("getStylePasteGroups", () => {
         expect(slideItems[3]).toEqual({ chart: null })
     })
 
-    it("returns no groups when an all-null leaf paste only targets rootless items", () => {
+    it("returns null when an all-null leaf paste only targets rootless items", () => {
         const copied = copyStyleValues({ type: "text" }, specialStyleInputs)
         const targets = [
             { index: 2, value: undefined },
             { index: 5, value: null }
         ]
 
-        expect(getStylePasteGroups(targets, copied.specialStyle, true)).toEqual([])
+        expect(getStylePastePlan(targets, copied.specialStyle, true)).toBeNull()
     })
 
-    it("returns one group with every target when the key is not a leaf root", () => {
+    it("returns one plan with every target when the key is not a leaf root", () => {
         const targets = [
             { index: 1, value: "none" },
             { index: 4, value: undefined }
         ]
 
-        expect(getStylePasteGroups(targets, "shrinkToFit", false)).toEqual([{ items: [1, 4], values: ["shrinkToFit", "shrinkToFit"] }])
-        expect(getStylePasteGroups([], "shrinkToFit", false)).toEqual([])
+        expect(getStylePastePlan(targets, "shrinkToFit", false)).toEqual({ items: [1, 4], values: ["shrinkToFit", "shrinkToFit"] })
+        expect(getStylePastePlan([], "shrinkToFit", false)).toBeNull()
+    })
+})
+
+describe("parseDottedId", () => {
+    it("splits valid root.leaf ids and rejects plain or edge-dot ids", () => {
+        expect(parseDottedId("chart.type")).toEqual(["chart", "type"])
+        expect(parseDottedId("textFit")).toBeNull()
+        expect(parseDottedId(".leading")).toBeNull()
+        expect(parseDottedId("trailing.")).toBeNull()
+    })
+})
+
+describe("setStyleLeaf", () => {
+    it("keeps each target's own content when setting one leaf on two targets", () => {
+        const first = { type: "bar", data: "A" }
+        const second = { type: "line", data: "B" }
+
+        const nextFirst = setStyleLeaf(first, "type", "pie")
+        const nextSecond = setStyleLeaf(second, "type", "pie")
+
+        expect(nextFirst).toEqual({ type: "pie", data: "A" })
+        expect(nextSecond).toEqual({ type: "pie", data: "B" })
+        expect(first).toEqual({ type: "bar", data: "A" })
+        expect(second).toEqual({ type: "line", data: "B" })
+    })
+
+    it("creates an object with just the leaf when the target has no root object", () => {
+        expect(setStyleLeaf(undefined, "type", "pie")).toEqual({ type: "pie" })
+        expect(setStyleLeaf(null, "type", "pie")).toEqual({ type: "pie" })
+        expect(setStyleLeaf("invalid", "type", "pie")).toEqual({ type: "pie" })
+    })
+
+    it("preserves null and falsy leaf values", () => {
+        expect(setStyleLeaf({ type: "bar", data: "A" }, "type", null)).toEqual({ type: null, data: "A" })
+        expect(setStyleLeaf({ type: "pie", data: "A" }, "holeSize", 0)).toEqual({ type: "pie", data: "A", holeSize: 0 })
+        expect(setStyleLeaf({ enabled: true }, "enabled", false)).toEqual({ enabled: false })
+        expect(setStyleLeaf({ lineBg: "#ffffff" }, "lineBg", "")).toEqual({ lineBg: "" })
+    })
+
+    it("clones object leaf values so targets do not share references", () => {
+        const parts = ["Soprano"]
+        const first = setStyleLeaf({ music: "A" }, "parts", parts)
+        const second = setStyleLeaf({ music: "B" }, "parts", parts)
+
+        first.parts.push("Alto")
+
+        expect(first).toEqual({ music: "A", parts: ["Soprano", "Alto"] })
+        expect(second).toEqual({ music: "B", parts: ["Soprano"] })
     })
 })
