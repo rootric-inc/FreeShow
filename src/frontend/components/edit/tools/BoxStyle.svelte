@@ -16,6 +16,7 @@
     import { addFilterString, addStyle, addStyleString, getItemStyleAtPos, getItemText, getLastLineAlign, getLineText, getSelectionRange } from "../scripts/textStyle"
     import { itemBoxes, setBoxInputValue } from "../values/boxes"
     import { VideoPlayer } from "../../media/video/videoPlayer"
+    import { escapeHtml, getSheetMusicLabel } from "../../slide/views/sheetMusic/helpers"
     import EditValues from "./EditValues.svelte"
 
     export let id: ItemType
@@ -229,7 +230,7 @@
 
     // -----
 
-    const setItemStyle = ["timer", "clock", "icon", "events", "camera", "variable", "web", "slide_tracker", "table"]
+    const setItemStyle = ["timer", "clock", "icon", "events", "camera", "variable", "web", "slide_tracker", "table", "sheet_music"]
 
     const setBox = () => clone(itemBoxes[id])!
     let box = setBox()
@@ -371,6 +372,12 @@
     $: if (id === "chart" && item) {
         setBoxInputValue(box, "default", "chart.holeSize", "hidden", item.chart?.type !== "pie")
         setBoxInputValue(box, "default", "chart.holeSize", "value", item.chart?.holeSize ?? 0)
+    }
+    $: if (id === "sheet_music" && item) {
+        const rawLabel = getSheetMusicLabel(item.sheet_music)
+        const label = rawLabel ? escapeHtml(rawLabel) : ""
+        setBoxInputValue(box, "default", "sheet_music", "values", { name: label || "actions.open_file" })
+        box = box
     }
     $: if (id === "visualizer" && item) {
         const visualizerType = item.visualizer?.type || "bars"

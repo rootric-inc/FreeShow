@@ -18,6 +18,7 @@
     import IconItem from "./views/IconItem.svelte"
     import MediaItem from "./views/MediaItem.svelte"
     import QrCode from "./views/QrCode.svelte"
+    import SheetMusic from "./views/SheetMusic.svelte"
     import SlideProgress from "./views/SlideProgress.svelte"
     import Table from "./views/Table.svelte"
     import Timer from "./views/Timer.svelte"
@@ -151,4 +152,6 @@
     <Table {item} {edit} {ref} {ratio} {index} />
 {:else if item.type === "qr_code"}
     <QrCode {item} {edit} />
+{:else if item.type === "sheet_music"}
+    <SheetMusic {item} {edit} isOutput={$currentWindow === "output"} />
 {/if}

@@ -443,6 +443,7 @@ export type Popups =
     | "create_collection"
     | "edit_event"
     | "edit_chart"
+    | "edit_sheet_music"
     | "choose_chord"
     | "choose_screen"
     | "choose_media_input"

@@ -1,4 +1,4 @@
-const { readdirSync, existsSync, lstatSync, unlinkSync, rmdirSync, readFileSync, writeFileSync, copyFileSync } = require("fs")
+const { readdirSync, existsSync, lstatSync, unlinkSync, rmdirSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } = require("fs")
 const { join } = require("path")
 
 // app build file paths
@@ -55,8 +55,28 @@ function getPdfWorkerFile() {
     }
 }
 
+function getSheetMusicEngine() {
+    const pkgDir = join(__dirname, "..", "node_modules", "verovio")
+    const outputDir = join(__dirname, "..", "public", "assets", "sheet-music")
+
+    try {
+        const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"))
+        const header = `// Verovio ${pkg.version} (${pkg.license || "LGPL-3.0"})\n`
+        mkdirSync(outputDir, { recursive: true })
+
+        for (const fileName of ["verovio-module.mjs", "verovio.mjs"]) {
+            const content = readFileSync(join(pkgDir, "dist", fileName), "utf8")
+            writeFileSync(join(outputDir, fileName), header + content)
+        }
+    } catch (err) {
+        console.error("Could not copy sheet music engine files:", err)
+        if (process.env.NODE_ENV === "production") process.exit(1)
+    }
+}
+
 if (process.env.NODE_ENV === "production") generateProdConfigs()
 getPdfWorkerFile()
+getSheetMusicEngine()
 
 // write release build repository info (currently for error reporting checks)
 const releaseRepo = process.env.GITHUB_REPOSITORY || "local"

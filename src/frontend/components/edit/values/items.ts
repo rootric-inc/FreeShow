@@ -50,6 +50,7 @@ export const slideItems: AddItemGroup[] = [
                 children: [
                     { id: "web", icon: "web", label: "items.web" },
                     { id: "qr_code", icon: "qr_code", label: "items.qr_code" },
+                    { id: "sheet_music", icon: "music", label: "items.sheet_music" },
                     { id: "slide_tracker", icon: "percentage", label: "items.slide_tracker" },
                     { id: "events", icon: "calendar", label: "items.events" },
                     { id: "weather", icon: "cloud", label: "items.weather" },
