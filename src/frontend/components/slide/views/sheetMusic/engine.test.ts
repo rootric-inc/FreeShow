@@ -47,19 +47,25 @@ describe("sheetMusic page width and ratio math", () => {
 })
 
 describe("createRenderCacheKey", () => {
-    it("distinguishes different MEI documents, page widths and ratios", () => {
+    it("distinguishes different MEI documents, page widths, ratios and measure-number flags", () => {
         const keyA = createRenderCacheKey("<mei>A</mei>", 1840)
         const keyB = createRenderCacheKey("<mei>B</mei>", 1840)
         const keyC = createRenderCacheKey("<mei>A</mei>", 2300)
         const keyRatio1 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31)
         const keyRatio2 = createRenderCacheKey("<mei>A</mei>", 1840, 0.56)
+        const keyNumbers = createRenderCacheKey("<mei>A</mei>", 1840, undefined, true)
+        const keyRatioNumbers = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, true)
 
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840))
+        expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false))
         expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31))
+        expect(keyNumbers).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, true))
         expect(keyA).not.toBe(keyB)
         expect(keyA).not.toBe(keyC)
         expect(keyA).not.toBe(keyRatio1)
+        expect(keyA).not.toBe(keyNumbers)
         expect(keyRatio1).not.toBe(keyRatio2)
+        expect(keyRatio1).not.toBe(keyRatioNumbers)
     })
 })
 

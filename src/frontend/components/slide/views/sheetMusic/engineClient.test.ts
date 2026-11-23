@@ -8,6 +8,7 @@ interface PostedMessage {
     mei?: string
     pageWidth?: number
     ratio?: number
+    showMeasureNumbers?: boolean
     text?: string
     first?: number
     last?: number
@@ -103,6 +104,30 @@ describe("sheetMusic engine client", () => {
             { svg: "<svg>shared</svg>", scale: 1, fits: true, pages: 1 },
             { svg: "<svg>shared</svg>", scale: 1, fits: true, pages: 1 }
         ])
+    })
+
+    it("keeps renders with measure numbers separate from default renders in flight and in cache", async () => {
+        const { renderMusic } = await import("./engine")
+
+        const pPlain = renderMusic("<mei>same</mei>", 1840)
+        const pNumbered = renderMusic("<mei>same</mei>", 1840, undefined, undefined, { showMeasureNumbers: true })
+
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toHaveLength(1)
+        expect(worker.posted[0].showMeasureNumbers).toBeUndefined()
+
+        worker.emitMessage({ id: worker.posted[0].id, ok: true, result: { svg: "<svg>plain</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pPlain).resolves.toEqual({ svg: "<svg>plain</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(2)
+        expect(worker.posted[1].showMeasureNumbers).toBe(true)
+        worker.emitMessage({ id: worker.posted[1].id, ok: true, result: { svg: "<svg>numbered</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pNumbered).resolves.toEqual({ svg: "<svg>numbered</svg>", scale: 1, fits: true, pages: 1 })
+
+        // Subsequent calls hit their own cache entries without posting again
+        await expect(renderMusic("<mei>same</mei>", 1840)).resolves.toEqual({ svg: "<svg>plain</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>same</mei>", 1840, undefined, undefined, { showMeasureNumbers: true })).resolves.toEqual({ svg: "<svg>numbered</svg>", scale: 1, fits: true, pages: 1 })
+        expect(worker.posted).toHaveLength(2)
     })
 
     it("surfaces ok:false worker errors with their code and maps every worker code to a real en.json key", async () => {

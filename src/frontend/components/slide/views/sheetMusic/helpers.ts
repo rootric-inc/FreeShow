@@ -127,9 +127,10 @@ export function getPageWidthFromStyle(style: string | null | undefined, size: un
     return calculatePageWidth(parseItemWidth(style), size)
 }
 
-export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number): string {
+export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false): string {
     const ratioPart = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? String(ratio) : ""
-    return `${pageWidth}:${ratioPart}:${mei}`
+    const measureNumbersPart = showMeasureNumbers ? "mnum" : ""
+    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${mei}`
 }
 
 export function prefixSvgIds(svg: string, prefix: string): string {

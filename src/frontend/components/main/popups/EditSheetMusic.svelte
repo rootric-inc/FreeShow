@@ -112,6 +112,7 @@
     let previewEl: HTMLDivElement | null = null
     let previewSvg = ""
     let previewData = ""
+    let previewHasMeasureNumbers = false
     let truncated = false
     let loading = false
     let error = ""
@@ -235,6 +236,7 @@
             saveOwnedFields({})
             previewSvg = ""
             previewData = ""
+            previewHasMeasureNumbers = false
             truncated = false
             hasAbcError = false
             return
@@ -310,10 +312,11 @@
             applyHighlight("")
             const latestData = getSheetMusicData(current)
             if (latestData) {
-                if (latestData !== previewData || !previewSvg) renderFilePreview(latestData)
+                if (latestData !== previewData || !previewSvg || !previewHasMeasureNumbers) renderFilePreview(latestData)
             } else {
                 previewSvg = ""
                 previewData = ""
+                previewHasMeasureNumbers = false
                 truncated = false
             }
             return
@@ -325,6 +328,7 @@
         } else {
             previewSvg = ""
             previewData = ""
+            previewHasMeasureNumbers = false
             problems = []
             noteRanges = []
             hasAbcError = false
@@ -344,18 +348,19 @@
         })
     }
 
-    function renderMei(mei: string, signal: AbortSignal) {
-        return renderMusic(mei, calculatePageWidth(1530, getSheetMusicSize(current)), undefined, signal)
+    function renderMei(mei: string, signal: AbortSignal, showMeasureNumbers = false) {
+        return renderMusic(mei, calculatePageWidth(1530, getSheetMusicSize(current)), undefined, signal, showMeasureNumbers ? { showMeasureNumbers: true } : undefined)
     }
 
     function renderFilePreview(mei: string) {
         truncated = false
         runTask(
             async (signal, isLive) => {
-                const rendered = await renderMei(mei, signal)
+                const rendered = await renderMei(mei, signal, true)
                 if (!isLive()) return
                 previewData = mei
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
+                previewHasMeasureNumbers = true
                 truncated = rendered.pages > 1
             },
             { fallbackError: "render" }
@@ -378,7 +383,7 @@
                     const loaded = await loadMusic(source, signal)
                     if (!isLive()) return
 
-                    const rendered = await renderMei(loaded.mei, signal)
+                    const rendered = await renderMei(loaded.mei, signal, true)
                     if (!isLive()) return
 
                     const fileLabel = loaded.title || removeExtension(getFileName(filePath))
@@ -398,6 +403,7 @@
                     })
                     previewData = loaded.mei
                     previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
+                    previewHasMeasureNumbers = true
                     truncated = rendered.pages > 1
                 } finally {
                     if (isLive()) loadingFile = false
@@ -418,17 +424,19 @@
                 const sliced = await sliceMusic(sourceMei, first, last, signal)
                 if (!isLive()) return
 
-                const rendered = await renderMei(sliced.mei, signal)
-                if (!isLive()) return
-
                 lastAppliedRangeKey = rangeLabel
                 saveOwnedFields({
                     data: sliced.mei,
                     label: sourceLabel,
                     measures: rangeLabel
                 })
+
+                const rendered = await renderMei(sliced.mei, signal, true)
+                if (!isLive()) return
+
                 previewData = sliced.mei
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
+                previewHasMeasureNumbers = true
                 truncated = rendered.pages > 1
             },
             { fallbackError: "load", existingToken }
@@ -531,11 +539,12 @@
                     saveAbc(normalized, analysis)
                 }
 
-                const rendered = await renderMei(analysis.mei, signal)
+                const rendered = await renderMei(analysis.mei, signal, false)
                 if (!isLive()) return
 
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
                 previewData = analysis.mei
+                previewHasMeasureNumbers = false
                 truncated = rendered.pages > 1
                 await tick()
                 if (!isLive()) return

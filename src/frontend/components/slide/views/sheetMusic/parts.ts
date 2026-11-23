@@ -14,12 +14,9 @@ export interface NamedPart {
     values: string[]
 }
 
-export interface MeasureRange {
+export interface ResolvedMeasureRange {
     first: number
     last: number
-}
-
-export interface ResolvedMeasureRange extends MeasureRange {
     firstNumber: number
     lastNumber: number
 }
@@ -96,15 +93,7 @@ export function resolvePartsSelection(preset: SheetMusicPartsPreset | undefined,
     }
 
     if (preset === "custom") {
-        const validSet = new Set(allKeys)
-        const seen = new Set<string>()
-        const kept: string[] = []
-        for (const key of customParts || []) {
-            if (validSet.has(key) && !seen.has(key)) {
-                seen.add(key)
-                kept.push(key)
-            }
-        }
+        const kept = resolveCustomPartsKeys(customParts, allKeys)
         if (!kept.length || kept.length === allKeys.length) {
             return { parts: "all", highestNoteOnly: false }
         }
@@ -188,40 +177,6 @@ export function getDisplayedVersesValue(raw: string | undefined, availableVerses
     const availableSet = new Set(availableVerses)
     const hasMatch = parsed.some((verse) => availableSet.has(verse))
     return hasMatch ? null : ""
-}
-
-export function parseMeasureRange(raw: string, totalMeasures: number): MeasureRange | null {
-    if (typeof raw !== "string" || !Number.isFinite(totalMeasures)) return null
-    const maxMeasure = Math.floor(totalMeasures)
-    if (maxMeasure < 1) return null
-
-    const trimmed = raw.trim()
-    if (!trimmed) return null
-
-    let start: number
-    let end: number
-
-    const singleMatch = /^(\d+)$/.exec(trimmed)
-    if (singleMatch) {
-        start = Number(singleMatch[1])
-        end = start
-    } else {
-        const openEndMatch = /^(\d+)\s*[-–]\s*$/.exec(trimmed)
-        if (openEndMatch) {
-            start = Number(openEndMatch[1])
-            end = maxMeasure
-        } else {
-            const rangeMatch = /^(\d+)\s*[-–]\s*(\d+)$/.exec(trimmed)
-            if (!rangeMatch) return null
-            start = Number(rangeMatch[1])
-            end = Number(rangeMatch[2])
-        }
-    }
-
-    if (start < 1 || end < 1 || start > end || start > maxMeasure) return null
-
-    const last = Math.min(end, maxMeasure)
-    return { first: start, last }
 }
 
 export function resolveMeasureRange(raw: string, measureNumbers: readonly number[]): ResolvedMeasureRange | null {

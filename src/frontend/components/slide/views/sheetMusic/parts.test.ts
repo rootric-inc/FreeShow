@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import type { MeiSummary } from "./meiParts"
-import { formatMeasureRange, getDisplayedVersesValue, getPartNames, hasPartsOptions, parseMeasureRange, parseVersesFilter, resolveCustomPartsKeys, resolveMeasureRange, resolvePartsSelection, resolveVersesSelection, toggleCustomPartKey } from "./parts"
+import { formatMeasureRange, getDisplayedVersesValue, getPartNames, hasPartsOptions, parseVersesFilter, resolveCustomPartsKeys, resolveMeasureRange, resolvePartsSelection, resolveVersesSelection, toggleCustomPartKey } from "./parts"
 
 const SATB_SUMMARY: MeiSummary = {
     staves: [
@@ -169,29 +169,31 @@ describe("parseVersesFilter, resolveVersesSelection and getDisplayedVersesValue"
     })
 })
 
-describe("parseMeasureRange, resolveMeasureRange and formatMeasureRange", () => {
+describe("resolveMeasureRange and formatMeasureRange", () => {
+    const sixteenBars = Array.from({ length: 16 }, (_, idx) => idx + 1)
+
     it("parses ranges, single measures and open-ended ranges, clamping the end only", () => {
-        expect(parseMeasureRange("5-8", 16)).toEqual({ first: 5, last: 8 })
-        expect(parseMeasureRange("5", 16)).toEqual({ first: 5, last: 5 })
-        expect(parseMeasureRange("5-", 16)).toEqual({ first: 5, last: 16 })
-        expect(parseMeasureRange(" 5 - 8 ", 16)).toEqual({ first: 5, last: 8 })
-        expect(parseMeasureRange("5-99", 16)).toEqual({ first: 5, last: 16 })
+        expect(resolveMeasureRange("5-8", sixteenBars)).toEqual({ first: 5, last: 8, firstNumber: 5, lastNumber: 8 })
+        expect(resolveMeasureRange("5", sixteenBars)).toEqual({ first: 5, last: 5, firstNumber: 5, lastNumber: 5 })
+        expect(resolveMeasureRange("5-", sixteenBars)).toEqual({ first: 5, last: 16, firstNumber: 5, lastNumber: 16 })
+        expect(resolveMeasureRange(" 5 - 8 ", sixteenBars)).toEqual({ first: 5, last: 8, firstNumber: 5, lastNumber: 8 })
+        expect(resolveMeasureRange("5-99", sixteenBars)).toEqual({ first: 5, last: 16, firstNumber: 5, lastNumber: 16 })
         expect(formatMeasureRange(5, 8)).toBe("5-8")
         expect(formatMeasureRange(5, 5)).toBe("5")
     })
 
     it("returns null for non-ranges, reversed ranges, or starts past the last bar", () => {
-        expect(parseMeasureRange("", 16)).toBeNull()
-        expect(parseMeasureRange("   ", 16)).toBeNull()
-        expect(parseMeasureRange("8-5", 16)).toBeNull()
-        expect(parseMeasureRange("0", 16)).toBeNull()
-        expect(parseMeasureRange("0-4", 16)).toBeNull()
-        expect(parseMeasureRange("-5", 16)).toBeNull()
-        expect(parseMeasureRange("abc", 16)).toBeNull()
-        expect(parseMeasureRange("1-2-3", 16)).toBeNull()
-        expect(parseMeasureRange("20-", 16)).toBeNull()
-        expect(parseMeasureRange("20-25", 16)).toBeNull()
-        expect(parseMeasureRange("1-4", 0)).toBeNull()
+        expect(resolveMeasureRange("", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("   ", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("8-5", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("0", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("0-4", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("-5", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("abc", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("1-2-3", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("20-", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("20-25", sixteenBars)).toBeNull()
+        expect(resolveMeasureRange("1-4", [])).toBeNull()
     })
 
     it("maps printed measure numbers (pickup bar 0 and split bars) to 1-based positions", () => {

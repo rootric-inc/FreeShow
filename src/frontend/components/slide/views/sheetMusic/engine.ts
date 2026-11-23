@@ -20,6 +20,10 @@ export interface RenderMusicResult {
     pages: number
 }
 
+export interface RenderMusicOptions {
+    showMeasureNumbers?: boolean
+}
+
 export type SheetMusicErrorCode = "load_failed" | "empty_music" | "render_failed" | "timeout" | "aborted"
 
 export class SheetMusicError extends Error {
@@ -399,13 +403,14 @@ export function sliceMusic(mei: string, first: number, last: number, signal?: Ab
     return promise
 }
 
-export function renderMusic(mei: string, pageWidth: number, ratio?: number, signal?: AbortSignal): Promise<RenderMusicResult> {
+export function renderMusic(mei: string, pageWidth: number, ratio?: number, signal?: AbortSignal, options?: RenderMusicOptions): Promise<RenderMusicResult> {
     if (signal?.aborted) {
         return Promise.reject(new SheetMusicError("aborted", "Sheet music request cancelled"))
     }
 
     const validRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : undefined
-    const key = createRenderCacheKey(mei, pageWidth, validRatio)
+    const showMeasureNumbers = Boolean(options?.showMeasureNumbers)
+    const key = createRenderCacheKey(mei, pageWidth, validRatio, showMeasureNumbers)
 
     if (isKeyTimedOut(key)) {
         return Promise.reject(new SheetMusicError("timeout", "Sheet music render timed out"))
@@ -417,7 +422,9 @@ export function renderMusic(mei: string, pageWidth: number, ratio?: number, sign
     const existing = inFlightRenders.get(key)
     if (existing) return attachWaiter(existing, signal)
 
-    const payload: Record<string, unknown> = validRatio !== undefined ? { type: "render", mei, pageWidth, ratio: validRatio } : { type: "render", mei, pageWidth }
+    const payload: Record<string, unknown> = { type: "render", mei, pageWidth }
+    if (validRatio !== undefined) payload.ratio = validRatio
+    if (showMeasureNumbers) payload.showMeasureNumbers = true
     const job: QueuedJob<RenderMusicResult> = {
         id: null,
         type: "render",

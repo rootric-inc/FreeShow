@@ -86,12 +86,84 @@ function setTagAttr(attrs, name, value) {
     return `${attrs.replace(/\s+$/, "")} ${name}="${value}"`
 }
 
-function extractMeterSignature(attrs, isElement) {
+function removeTagAttr(attrs, name) {
+    const escaped = name.replace(/\./g, "\\.")
+    const pattern = new RegExp(`\\s+${escaped}\\s*=\\s*(?:"[^"]*"|'[^']*')`, "g")
+    return attrs.replace(pattern, "")
+}
+
+function extractMeter(attrs, isElement) {
     const count = readTagAttr(attrs, isElement ? "count" : "meter.count")
     const unit = readTagAttr(attrs, isElement ? "unit" : "meter.unit")
     const sym = readTagAttr(attrs, isElement ? "sym" : "meter.sym")
     if (count === null && unit === null && sym === null) return null
-    return `${count ?? ""}|${unit ?? ""}|${sym ?? ""}`
+    return { count, unit, sym }
+}
+
+function formatMeterKey(meter) {
+    if (!meter) return null
+    return `${meter.count ?? ""}|${meter.unit ?? ""}|${meter.sym ?? ""}`
+}
+
+function writeMeterAttrs(attrs, meter, isElement) {
+    const countName = isElement ? "count" : "meter.count"
+    const unitName = isElement ? "unit" : "meter.unit"
+    const symName = isElement ? "sym" : "meter.sym"
+    let updated = attrs
+    updated = meter.count !== null ? setTagAttr(updated, countName, meter.count) : removeTagAttr(updated, countName)
+    updated = meter.unit !== null ? setTagAttr(updated, unitName, meter.unit) : removeTagAttr(updated, unitName)
+    updated = meter.sym !== null ? setTagAttr(updated, symName, meter.sym) : removeTagAttr(updated, symName)
+    return updated
+}
+
+export function getActiveMeterAtMeasure(mei, targetMeasure) {
+    if (typeof mei !== "string" || !Number.isFinite(targetMeasure) || targetMeasure < 1) return null
+
+    const tagRe = /<(\/?)(scoreDef|staffDef|meterSig|measure)\b([^>]*?)(\/?)>/g
+    let measureIndex = 0
+    let activeMeter = null
+    let match
+
+    while ((match = tagRe.exec(mei)) !== null) {
+        const [, closingSlash, tagName, attrs] = match
+        if (tagName === "measure") {
+            if (closingSlash) continue
+            measureIndex++
+            if (measureIndex === targetMeasure) return activeMeter
+            continue
+        }
+
+        if (closingSlash) continue
+
+        const meter = extractMeter(attrs, tagName === "meterSig")
+        if (meter !== null) {
+            activeMeter = meter
+        }
+    }
+
+    return null
+}
+
+export function applyInitialMeter(mei, meter) {
+    if (typeof mei !== "string" || !meter) return mei
+    return mei.replace(/<scoreDef\b[^>]*\/>|<scoreDef\b[^>]*>[\s\S]*?<\/scoreDef>/, (block) => {
+        let updatedExisting = false
+        let updatedBlock = block
+            .replace(/<(scoreDef|staffDef)\b([^>]*?)(\/?)>/g, (tag, name, attrs, slash) => {
+                if (!/\bmeter\.(?:count|unit|sym)=(?:"[^"]*"|'[^']*')/.test(attrs)) return tag
+                updatedExisting = true
+                return `<${name}${writeMeterAttrs(attrs, meter, false)}${slash}>`
+            })
+            .replace(/<meterSig\b([^>]*?)(\/?)>/g, (_tag, attrs, slash) => {
+                updatedExisting = true
+                return `<meterSig${writeMeterAttrs(attrs, meter, true)}${slash}>`
+            })
+
+        if (!updatedExisting) {
+            updatedBlock = updatedBlock.replace(/^<scoreDef\b([^>]*?)(\/?)>/, (_tag, attrs, slash) => `<scoreDef${writeMeterAttrs(attrs, meter, false)}${slash}>`)
+        }
+        return updatedBlock
+    })
 }
 
 export function hasMeterChangeAtMeasure(mei, targetMeasure) {
@@ -128,7 +200,7 @@ export function hasMeterChangeAtMeasure(mei, targetMeasure) {
 
         if (closingSlash) continue
 
-        const signature = extractMeterSignature(attrs, tagName === "meterSig")
+        const signature = formatMeterKey(extractMeter(attrs, tagName === "meterSig"))
         if (signature !== null) {
             activeMeter = signature
             if (!insideMeasure && measureIndex === targetMeasure - 1) {

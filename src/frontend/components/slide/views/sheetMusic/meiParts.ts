@@ -39,11 +39,20 @@ interface VerseFilterContext {
     filteringVerses: boolean
     keptVerses: Set<number> | null
     verseRenumberMap: Map<number, number>
+    measuresWithChosenVerse: Set<number>
+    lastChosenVerseMeasureIndex: number
+    lastChosenVerseEndTokenByLayer: Map<string, number>
+}
+
+interface VerseNotePosition {
+    measureIndex: number
+    layerKey: string
+    tokenIndex: number
 }
 
 interface AccidentalContext {
-    removedWritten: Map<string, Set<string>>
-    resolvedOnKept: Set<string>
+    removedWritten: Map<string, Map<string, string>>
+    readerAccidental: Map<string, string>
 }
 
 interface ChordNoteEntry {
@@ -56,6 +65,7 @@ interface ChordNoteEntry {
 
 const PITCH_ORDER = "cdefgab"
 const CHORD_INHERITED_ATTRS = ["dur", "dur.ppq", "dots", "fermata", "stem.dir", "artic", "tie", "beam", "tuplet"] as const
+const LAYER_CONTAINER_TAGS = new Set(["beam", "tuplet", "bTrem", "fTrem", "ligature", "graceGrp", "beamSpan"])
 const ATTR_PATTERN = /([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
 
 function scanXml(xml: string): XmlToken[] {
@@ -220,15 +230,28 @@ export function getMeasureNumbers(mei: string): number[] {
 
     if (!rawNumbers.length) return []
 
-    const parsed: number[] = []
-    for (let i = 0; i < rawNumbers.length; i++) {
-        const raw = rawNumbers[i]
-        if (raw === null) return rawNumbers.map((_, idx) => idx + 1)
+    const numericValues: (number | null)[] = rawNumbers.map((raw) => {
+        if (raw === null) return null
         const trimmed = raw.trim()
-        if (!/^\d+$/.test(trimmed)) return rawNumbers.map((_, idx) => idx + 1)
-        const value = Number(trimmed)
-        if (i > 0 && value < parsed[i - 1]) return rawNumbers.map((_, idx) => idx + 1)
-        parsed.push(value)
+        if (!/^\d+$/.test(trimmed)) return null
+        return Number(trimmed)
+    })
+
+    const firstNumeric = numericValues.find((value): value is number => value !== null)
+    if (firstNumeric === undefined) return rawNumbers.map((_, idx) => idx + 1)
+
+    const parsed: number[] = []
+    for (const value of numericValues) {
+        if (value !== null) {
+            if (parsed.length > 0 && value < parsed[parsed.length - 1]) {
+                return rawNumbers.map((_, idx) => idx + 1)
+            }
+            parsed.push(value)
+        } else if (parsed.length > 0) {
+            parsed.push(parsed[parsed.length - 1])
+        } else {
+            parsed.push(firstNumeric)
+        }
     }
 
     return parsed
@@ -369,7 +392,7 @@ function renumberVerseSubtree(slice: XmlToken[], newNumber: number): string {
     )
 }
 
-function filterVerseSubtrees(verseSubtrees: SubtreeResult[], verseCtx: VerseFilterContext, removedIds: Set<string>): string[] {
+function filterVerseSubtrees(verseSubtrees: SubtreeResult[], verseCtx: VerseFilterContext, notePosition: VerseNotePosition, removedIds: Set<string>): string[] {
     if (!verseSubtrees.length) return []
     if (!verseCtx.filteringVerses || verseCtx.keptVerses === null) {
         return verseSubtrees.map((subtree) => subtree.html)
@@ -379,7 +402,27 @@ function filterVerseSubtrees(verseSubtrees: SubtreeResult[], verseCtx: VerseFilt
         return []
     }
     if (verseSubtrees.length === 1) {
-        return [renumberVerseSubtree(verseSubtrees[0].slice, 1)]
+        const onlySubtree = verseSubtrees[0]
+        const first = onlySubtree.slice[0]
+        const rawN = first && (first.kind === "open" || first.kind === "self") ? getAttr(first.attrsRaw, "n") : null
+        const verseNumber = parseVerseNumber(rawN)
+        if (verseNumber === null) {
+            return [renumberVerseSubtree(onlySubtree.slice, 1)]
+        }
+        if (verseCtx.keptVerses.has(verseNumber)) {
+            const mapped = verseCtx.verseRenumberMap.get(verseNumber) ?? 1
+            return [renumberVerseSubtree(onlySubtree.slice, mapped)]
+        }
+
+        const barHasChosenVerse = verseCtx.measuresWithChosenVerse.has(notePosition.measureIndex)
+        const lastChosenEndInLayer = verseCtx.lastChosenVerseEndTokenByLayer.get(notePosition.layerKey) ?? -1
+        const afterLastChosenVerse = notePosition.measureIndex > verseCtx.lastChosenVerseMeasureIndex || (notePosition.measureIndex === verseCtx.lastChosenVerseMeasureIndex && lastChosenEndInLayer !== -1 && notePosition.tokenIndex > lastChosenEndInLayer)
+        if (!barHasChosenVerse || afterLastChosenVerse) {
+            return [renumberVerseSubtree(onlySubtree.slice, 1)]
+        }
+
+        collectElementIds(onlySubtree.slice, removedIds)
+        return []
     }
 
     const kept: string[] = []
@@ -404,6 +447,33 @@ function getPitchKey(attrsRaw: string): string | null {
     const oct = getAttr(attrsRaw, "oct")
     if (!pname || !oct) return null
     return `${pname.toLowerCase()}:${oct}`
+}
+
+function normalizeAccidentalKind(raw: string): string {
+    const trimmed = raw.trim().toLowerCase()
+    if (trimmed === "x") return "ss"
+    return trimmed
+}
+
+function recordRemovedWrittenAccidental(target: Map<string, Map<string, string>>, pitchKey: string, written: string): void {
+    const kind = normalizeAccidentalKind(written)
+    if (!kind) return
+    let byKind = target.get(pitchKey)
+    if (!byKind) {
+        byKind = new Map()
+        target.set(pitchKey, byKind)
+    }
+    if (!byKind.has(kind)) byKind.set(kind, written)
+}
+
+function getChildWrittenAccidental(childSubtrees: SubtreeResult[]): string | null {
+    for (const subtree of childSubtrees) {
+        const first = subtree.slice[0]
+        if (!first || (first.kind !== "open" && first.kind !== "self") || first.name !== "accid") continue
+        const accidAttr = getAttr(first.attrsRaw, "accid")
+        if (accidAttr) return accidAttr
+    }
+    return null
 }
 
 function applyAccidentalPromotion(noteAttrsRaw: string, childSubtrees: SubtreeResult[], accidentalCtx: AccidentalContext | null): { attrsRaw: string; childHtmls: string[] } {
@@ -435,26 +505,29 @@ function applyAccidentalPromotion(noteAttrsRaw: string, childSubtrees: SubtreeRe
 
     const written = attrWritten || childWritten
     if (written) {
-        accidentalCtx.resolvedOnKept.add(`${pitchKey}:${written}`)
+        const writtenKind = normalizeAccidentalKind(written)
+        if (writtenKind) accidentalCtx.readerAccidental.set(pitchKey, writtenKind)
         return { attrsRaw: noteAttrsRaw, childHtmls }
     }
 
-    const removedForPitch = accidentalCtx.removedWritten.get(pitchKey)
-    if (!removedForPitch || !removedForPitch.size) return { attrsRaw: noteAttrsRaw, childHtmls }
-
     const attrGes = getAttr(noteAttrsRaw, "accid.ges")
     const gesValue = attrGes || childGesValue
-    if (!gesValue || !removedForPitch.has(gesValue)) return { attrsRaw: noteAttrsRaw, childHtmls }
+    if (!gesValue) return { attrsRaw: noteAttrsRaw, childHtmls }
 
-    const resolvedKey = `${pitchKey}:${gesValue}`
-    if (accidentalCtx.resolvedOnKept.has(resolvedKey)) return { attrsRaw: noteAttrsRaw, childHtmls }
+    const gesKind = normalizeAccidentalKind(gesValue)
+    if (!gesKind || accidentalCtx.readerAccidental.get(pitchKey) === gesKind) {
+        return { attrsRaw: noteAttrsRaw, childHtmls }
+    }
 
-    accidentalCtx.resolvedOnKept.add(resolvedKey)
+    const promotedSpelling = accidentalCtx.removedWritten.get(pitchKey)?.get(gesKind)
+    if (!promotedSpelling) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    accidentalCtx.readerAccidental.set(pitchKey, gesKind)
     if (childGesIndex !== -1 && !attrGes) {
         const targetSubtree = childSubtrees[childGesIndex]
         const first = targetSubtree.slice[0]
         if (first && (first.kind === "open" || first.kind === "self")) {
-            const updatedTag = formatTag(first.kind, first.name, setAttr(first.attrsRaw, "accid", gesValue))
+            const updatedTag = formatTag(first.kind, first.name, setAttr(first.attrsRaw, "accid", promotedSpelling))
             childHtmls[childGesIndex] =
                 updatedTag +
                 targetSubtree.slice
@@ -465,10 +538,10 @@ function applyAccidentalPromotion(noteAttrsRaw: string, childSubtrees: SubtreeRe
         return { attrsRaw: noteAttrsRaw, childHtmls }
     }
 
-    return { attrsRaw: setAttr(noteAttrsRaw, "accid", gesValue), childHtmls }
+    return { attrsRaw: setAttr(noteAttrsRaw, "accid", promotedSpelling), childHtmls }
 }
 
-function collectRemovedLayerAccidentals(layerTokens: XmlToken[], target: Map<string, Set<string>>): void {
+function collectRemovedLayerAccidentals(layerTokens: XmlToken[], target: Map<string, Map<string, string>>): void {
     for (let index = 0; index < layerTokens.length; index++) {
         const token = layerTokens[index]
         if ((token.kind !== "open" && token.kind !== "self") || token.name !== "note") continue
@@ -499,8 +572,7 @@ function collectRemovedLayerAccidentals(layerTokens: XmlToken[], target: Map<str
         }
 
         if (written) {
-            if (!target.has(pitchKey)) target.set(pitchKey, new Set())
-            target.get(pitchKey)!.add(written)
+            recordRemovedWrittenAccidental(target, pitchKey, written)
         }
     }
 }
@@ -513,17 +585,13 @@ function extractRemovedLayerClefs(layerTokens: XmlToken[], removedIds: Set<strin
     let index = 1
     while (index < layerTokens.length - 1) {
         const token = layerTokens[index]
-        if (token.kind === "other") {
-            index++
-            continue
-        }
-        if (token.kind === "close") {
+        if (token.kind === "other" || token.kind === "close") {
             index++
             continue
         }
 
-        const subtree = serializeSubtree(layerTokens, index)
         if (token.name === "clef") {
+            const subtree = serializeSubtree(layerTokens, index)
             const clef: RescuedClef = { html: subtree.html, ids: extractElementIds(subtree.slice) }
             if (!sawPrecedingElement) {
                 if (sameBarClef) {
@@ -536,10 +604,14 @@ function extractRemovedLayerClefs(layerTokens: XmlToken[], removedIds: Set<strin
                 }
                 nextBarClef = clef
             }
-        } else {
+            index = subtree.nextIndex
+            continue
+        }
+
+        if (!LAYER_CONTAINER_TAGS.has(token.name)) {
             sawPrecedingElement = true
         }
-        index = subtree.nextIndex
+        index++
     }
 
     const rescuedIds = new Set<string>()
@@ -562,7 +634,7 @@ function layerStartsWithClef(layerTokens: XmlToken[]): boolean {
     return false
 }
 
-function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem: boolean, verseCtx: VerseFilterContext, notePosition: VerseNotePosition, accidentalCtx: AccidentalContext | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
     const rawChordVerses: SubtreeResult[] = []
     const chordOtherChildren: string[] = []
     const notes: ChordNoteEntry[] = []
@@ -665,6 +737,15 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
     const fallbackRawVerses: SubtreeResult[] = []
     for (let i = 0; i < notes.length; i++) {
         if (i === bestIndex) continue
+        if (accidentalCtx) {
+            const droppedPitchKey = getPitchKey(notes[i].attrsRaw)
+            if (droppedPitchKey) {
+                const droppedWritten = getAttr(notes[i].attrsRaw, "accid") || getChildWrittenAccidental(notes[i].otherSubtrees)
+                if (droppedWritten) {
+                    recordRemovedWrittenAccidental(accidentalCtx.removedWritten, droppedPitchKey, droppedWritten)
+                }
+            }
+        }
         for (const droppedId of notes[i].removedIds) removedIds.add(droppedId)
         if (usePrimaryVerses) {
             for (const verse of notes[i].rawVerses) collectElementIds(verse.slice, removedIds)
@@ -674,7 +755,7 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
     }
 
     const sourceVerses = usePrimaryVerses ? [...rawChordVerses, ...winner.rawVerses] : fallbackRawVerses
-    const keptVerses = filterVerseSubtrees(sourceVerses, verseCtx, removedIds)
+    const keptVerses = filterVerseSubtrees(sourceVerses, verseCtx, notePosition, removedIds)
 
     let mergedAttrs = winner.attrsRaw
     const winnerId = getAttr(mergedAttrs, "xml:id")
@@ -704,7 +785,7 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
     return `${formatTag("open", "note", mergedAttrs)}${children}</note>`
 }
 
-function emitNoteToken(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
+function emitNoteToken(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, notePosition: VerseNotePosition, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
     const token = tokens[startIndex]
     if (token.kind !== "open" && token.kind !== "self") {
         return { html: token.raw, nextIndex: startIndex + 1 }
@@ -762,7 +843,7 @@ function emitNoteToken(tokens: XmlToken[], startIndex: number, stripStem: boolea
         attrsRaw = removeAttr(attrsRaw, "stem.dir")
     }
 
-    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, removedIds)
+    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, notePosition, removedIds)
     const innerHtml = parts
         .map((part) => {
             if (part.kind === "raw") return part.text
@@ -777,7 +858,7 @@ function emitNoteToken(tokens: XmlToken[], startIndex: number, stripStem: boolea
     return { html: `${openTag}${innerHtml}${closeTag}`, nextIndex: subtree.nextIndex }
 }
 
-function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
+function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, chordPosition: VerseNotePosition, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
     const token = tokens[startIndex]
     if (token.kind !== "open") {
         let selfAttrsRaw = token.kind === "self" ? token.attrsRaw : ""
@@ -812,7 +893,12 @@ function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem
             continue
         }
         if (child.name === "note") {
-            const emittedNote = emitNoteToken(subtree.slice, cursor, stripStem, verseCtx, accidentalCtx, removedIds)
+            const notePosition: VerseNotePosition = {
+                measureIndex: chordPosition.measureIndex,
+                layerKey: chordPosition.layerKey,
+                tokenIndex: chordPosition.tokenIndex + cursor
+            }
+            const emittedNote = emitNoteToken(subtree.slice, cursor, stripStem, verseCtx, notePosition, accidentalCtx, removedIds)
             parts.push({ kind: "raw", text: emittedNote.html })
             cursor = emittedNote.nextIndex
             continue
@@ -827,7 +913,7 @@ function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem
     if (stripStem && getAttr(attrsRaw, "stem.dir") !== null) {
         attrsRaw = removeAttr(attrsRaw, "stem.dir")
     }
-    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, removedIds)
+    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, chordPosition, removedIds)
     const innerHtml = parts.map((part) => (part.kind === "verses" ? keptVerses.join("") : part.text)).join("")
     const openTag = attrsRaw === token.attrsRaw ? token.raw : formatTag("open", "chord", attrsRaw)
     const closeToken = subtree.slice[subtree.slice.length - 1]
@@ -835,10 +921,11 @@ function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem
     return { html: `${openTag}${innerHtml}${closeTag}`, nextIndex: subtree.nextIndex }
 }
 
-function emitKeptLayer(layerTokens: XmlToken[], staffN: string, firstStaffN: string, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, clefToPrepend: RescuedClef | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+function emitKeptLayer(layerTokens: XmlToken[], staffN: string, layerN: string, measureIndex: number, layerTokenOffset: number, firstStaffN: string, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, clefToPrepend: RescuedClef | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
     const first = layerTokens[0]
     if (!first || first.kind === "self") return first ? first.raw : ""
 
+    const layerKey = `${staffN}.${layerN}`
     const output: string[] = [first.raw]
     if (clefToPrepend) {
         if (layerStartsWithClef(layerTokens)) {
@@ -858,21 +945,23 @@ function emitKeptLayer(layerTokens: XmlToken[], staffN: string, firstStaffN: str
         }
 
         if (token.name === "chord") {
+            const chordPosition: VerseNotePosition = { measureIndex, layerKey, tokenIndex: layerTokenOffset + index }
             if (reduceChords && staffN === firstStaffN && token.kind === "open") {
                 const subtree = serializeSubtree(layerTokens, index)
                 const innerTokens = subtree.slice.slice(1, -1)
-                output.push(collapseChord(token.attrsRaw, innerTokens, stripStem, verseCtx, accidentalCtx, removedIds, remappedIds))
+                output.push(collapseChord(token.attrsRaw, innerTokens, stripStem, verseCtx, chordPosition, accidentalCtx, removedIds, remappedIds))
                 index = subtree.nextIndex
                 continue
             }
-            const emittedChord = emitNonCollapsedChord(layerTokens, index, stripStem, verseCtx, accidentalCtx, removedIds)
+            const emittedChord = emitNonCollapsedChord(layerTokens, index, stripStem, verseCtx, chordPosition, accidentalCtx, removedIds)
             output.push(emittedChord.html)
             index = emittedChord.nextIndex
             continue
         }
 
         if (token.name === "note") {
-            const emittedNote = emitNoteToken(layerTokens, index, stripStem, verseCtx, accidentalCtx, removedIds)
+            const notePosition: VerseNotePosition = { measureIndex, layerKey, tokenIndex: layerTokenOffset + index }
+            const emittedNote = emitNoteToken(layerTokens, index, stripStem, verseCtx, notePosition, accidentalCtx, removedIds)
             output.push(emittedNote.html)
             index = emittedNote.nextIndex
             continue
@@ -893,13 +982,23 @@ function emitKeptLayer(layerTokens: XmlToken[], staffN: string, firstStaffN: str
     return output.join("")
 }
 
-function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: string, filteringParts: boolean, keptLayers: Set<string> | undefined, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, pendingClefByStaff: Map<string, RescuedClef>, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+function cloneRemovedWrittenMap(source: Map<string, Map<string, string>>): Map<string, Map<string, string>> {
+    const copy = new Map<string, Map<string, string>>()
+    for (const [pitchKey, byKind] of source) {
+        copy.set(pitchKey, new Map(byKind))
+    }
+    return copy
+}
+
+function processKeptStaff(staffTokens: XmlToken[], staffN: string, measureIndex: number, staffTokenOffset: number, firstStaffN: string, filteringParts: boolean, keptLayers: Set<string> | undefined, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, pendingClefByStaff: Map<string, RescuedClef>, removedIds: Set<string>, remappedIds: Map<string, string>): string {
     const first = staffTokens[0]
     if (!first || first.kind === "self") return first ? first.raw : ""
 
     interface StaffChild {
         kind: "layer" | "other"
         kept: boolean
+        layerN: string
+        tokenOffset: number
         tokens: XmlToken[]
     }
 
@@ -908,7 +1007,7 @@ function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: 
     while (cursor < staffTokens.length - 1) {
         const token = staffTokens[cursor]
         if (token.kind === "other" || token.kind === "close") {
-            children.push({ kind: "other", kept: true, tokens: [token] })
+            children.push({ kind: "other", kept: true, layerN: "", tokenOffset: staffTokenOffset + cursor, tokens: [token] })
             cursor++
             continue
         }
@@ -917,14 +1016,14 @@ function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: 
         if (token.name === "layer") {
             const layerN = getAttr(token.attrsRaw, "n") || "1"
             const isKept = !filteringParts || Boolean(keptLayers?.has(layerN))
-            children.push({ kind: "layer", kept: isKept, tokens: subtree.slice })
+            children.push({ kind: "layer", kept: isKept, layerN, tokenOffset: staffTokenOffset + cursor, tokens: subtree.slice })
         } else {
-            children.push({ kind: "other", kept: true, tokens: subtree.slice })
+            children.push({ kind: "other", kept: true, layerN: "", tokenOffset: staffTokenOffset + cursor, tokens: subtree.slice })
         }
         cursor = subtree.nextIndex
     }
 
-    const removedWritten = new Map<string, Set<string>>()
+    const removedWritten = new Map<string, Map<string, string>>()
     let sameBarClef: RescuedClef | null = null
     let nextBarClef: RescuedClef | null = null
 
@@ -967,7 +1066,7 @@ function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: 
         pendingClefByStaff.set(staffN, nextBarClef)
     }
 
-    const accidentalCtx: AccidentalContext | null = removedWritten.size > 0 ? { removedWritten, resolvedOnKept: new Set() } : null
+    const trackAccidentals = removedWritten.size > 0 || (reduceChords && staffN === firstStaffN)
     const output: string[] = [first.raw]
     let appliedClef = false
 
@@ -976,7 +1075,8 @@ function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: 
         if (child.kind === "layer") {
             const prepend = !appliedClef ? clefToPrepend : null
             appliedClef = true
-            output.push(emitKeptLayer(child.tokens, staffN, firstStaffN, reduceChords, stripStem, verseCtx, accidentalCtx, prepend, removedIds, remappedIds))
+            const accidentalCtx: AccidentalContext | null = trackAccidentals ? { removedWritten: cloneRemovedWrittenMap(removedWritten), readerAccidental: new Map() } : null
+            output.push(emitKeptLayer(child.tokens, staffN, child.layerN, measureIndex, child.tokenOffset, firstStaffN, reduceChords, stripStem, verseCtx, accidentalCtx, prepend, removedIds, remappedIds))
         } else {
             output.push(child.tokens.map((token) => token.raw).join(""))
         }
@@ -1171,6 +1271,112 @@ function cleanControlReferences(mei: string, removedIds: Set<string>, remappedId
     return output.join("")
 }
 
+function collectChosenVersePositions(tokens: XmlToken[], filteringParts: boolean, keptStaves: Set<string>, keptLayersByStaff: Map<string, Set<string>>, keptVerses: Set<number>): { measuresWithChosenVerse: Set<number>; lastChosenVerseMeasureIndex: number; lastChosenVerseEndTokenByLayer: Map<string, number> } {
+    const measuresWithChosenVerse = new Set<number>()
+    const lastChosenVerseEndTokenByLayer = new Map<string, number>()
+    let lastChosenVerseMeasureIndex = -1
+
+    let measureIndex = 0
+    const staffStack: string[] = []
+    const layerStack: string[] = []
+    let chordDepth = 0
+    let chordEndTokenIndex = -1
+    let noteDepth = 0
+    let noteEndTokenIndex = -1
+
+    const findMatchingCloseIndex = (startIndex: number): number => {
+        const first = tokens[startIndex]
+        if (!first || first.kind === "self") return startIndex
+        let depth = 1
+        for (let i = startIndex + 1; i < tokens.length; i++) {
+            const current = tokens[i]
+            if (current.kind === "open") depth++
+            else if (current.kind === "close") {
+                depth--
+                if (depth === 0) return i
+            }
+        }
+        return tokens.length - 1
+    }
+
+    for (let index = 0; index < tokens.length; index++) {
+        const token = tokens[index]
+        if (token.kind === "other") continue
+
+        if (token.kind === "close") {
+            if (token.name === "staff" && staffStack.length > 0) staffStack.pop()
+            else if (token.name === "layer" && layerStack.length > 0) layerStack.pop()
+            else if (token.name === "chord" && chordDepth > 0) {
+                chordDepth--
+                if (chordDepth === 0) chordEndTokenIndex = -1
+            } else if (token.name === "note" && noteDepth > 0) {
+                noteDepth--
+                if (noteDepth === 0) noteEndTokenIndex = -1
+            }
+            continue
+        }
+
+        if (token.name === "measure") {
+            measureIndex++
+            continue
+        }
+
+        if (token.name === "staff") {
+            if (token.kind === "open") staffStack.push(getAttr(token.attrsRaw, "n") || "")
+            continue
+        }
+
+        if (token.name === "layer") {
+            if (token.kind === "open") layerStack.push(getAttr(token.attrsRaw, "n") || "1")
+            continue
+        }
+
+        if (token.name === "chord") {
+            if (token.kind === "open") {
+                if (chordDepth === 0) chordEndTokenIndex = findMatchingCloseIndex(index)
+                chordDepth++
+            }
+            continue
+        }
+
+        if (token.name === "note") {
+            if (token.kind === "open") {
+                if (noteDepth === 0) noteEndTokenIndex = findMatchingCloseIndex(index)
+                noteDepth++
+            }
+            continue
+        }
+
+        if (token.name === "verse") {
+            const currentStaff = staffStack[staffStack.length - 1] ?? ""
+            const currentLayer = layerStack[layerStack.length - 1] ?? "1"
+            if (filteringParts) {
+                if (!currentStaff || !keptStaves.has(currentStaff)) continue
+                if (!keptLayersByStaff.get(currentStaff)?.has(currentLayer)) continue
+            }
+
+            const verseNumber = parseVerseNumber(getAttr(token.attrsRaw, "n"))
+            if (verseNumber === null || !keptVerses.has(verseNumber)) continue
+
+            measuresWithChosenVerse.add(measureIndex)
+            const ownerEndToken = chordEndTokenIndex !== -1 ? chordEndTokenIndex : noteEndTokenIndex !== -1 ? noteEndTokenIndex : index
+            if (measureIndex > lastChosenVerseMeasureIndex) {
+                lastChosenVerseMeasureIndex = measureIndex
+                lastChosenVerseEndTokenByLayer.clear()
+            }
+            if (measureIndex === lastChosenVerseMeasureIndex) {
+                const layerKey = `${currentStaff}.${currentLayer}`
+                const previousEnd = lastChosenVerseEndTokenByLayer.get(layerKey) ?? -1
+                if (ownerEndToken > previousEnd) {
+                    lastChosenVerseEndTokenByLayer.set(layerKey, ownerEndToken)
+                }
+            }
+        }
+    }
+
+    return { measuresWithChosenVerse, lastChosenVerseMeasureIndex, lastChosenVerseEndTokenByLayer }
+}
+
 export function filterMei(mei: string, options: FilterMeiOptions): string {
     if (!mei || typeof mei !== "string") return mei
 
@@ -1241,19 +1447,25 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
         return (keptLayersByStaff.get(staffN)?.size ?? 0) === 1
     }
 
+    const tokens = scanXml(mei)
+    const versePositions = filteringVerses && keptVerses && keptVerses.size > 0 ? collectChosenVersePositions(tokens, filteringParts, keptStaves, keptLayersByStaff, keptVerses) : { measuresWithChosenVerse: new Set<number>(), lastChosenVerseMeasureIndex: -1, lastChosenVerseEndTokenByLayer: new Map<string, number>() }
+
     const verseCtx: VerseFilterContext = {
         filteringVerses,
         keptVerses,
-        verseRenumberMap
+        verseRenumberMap,
+        measuresWithChosenVerse: versePositions.measuresWithChosenVerse,
+        lastChosenVerseMeasureIndex: versePositions.lastChosenVerseMeasureIndex,
+        lastChosenVerseEndTokenByLayer: versePositions.lastChosenVerseEndTokenByLayer
     }
 
-    const tokens = scanXml(mei)
     const output: string[] = []
     const removedIds = new Set<string>()
     const remappedIds = new Map<string, string>()
     const pendingClefByStaff = new Map<string, RescuedClef>()
 
     let skipDepth = 0
+    let measureIndex = 0
 
     for (let index = 0; index < tokens.length; index++) {
         const token = tokens[index]
@@ -1272,6 +1484,10 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
         if (token.kind === "other" || token.kind === "close") {
             output.push(token.raw)
             continue
+        }
+
+        if (token.name === "measure") {
+            measureIndex++
         }
 
         if (filteringParts && token.name === "staffDef") {
@@ -1294,7 +1510,7 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
             }
             if (token.kind === "open" && staffN) {
                 const subtree = serializeSubtree(tokens, index)
-                output.push(processKeptStaff(subtree.slice, staffN, firstStaffN, filteringParts, keptLayersByStaff.get(staffN), reduceChords, shouldStripStemsOnStaff(staffN), verseCtx, pendingClefByStaff, removedIds, remappedIds))
+                output.push(processKeptStaff(subtree.slice, staffN, measureIndex, index, firstStaffN, filteringParts, keptLayersByStaff.get(staffN), reduceChords, shouldStripStemsOnStaff(staffN), verseCtx, pendingClefByStaff, removedIds, remappedIds))
                 index = subtree.nextIndex - 1
                 continue
             }

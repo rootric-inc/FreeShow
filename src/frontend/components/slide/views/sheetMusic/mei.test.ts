@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { countMeasures, extractTitle, findFittingLayout, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -61,6 +61,22 @@ describe("mei pure helpers", () => {
         expect(hasMeterChangeAtMeasure(mei, 5)).toBe(false)
         expect(hasMeterChangeAtMeasure(mei, 6)).toBe(true)
         expect(hasMeterChangeAtMeasure(mei, 7)).toBe(false)
+
+        expect(getActiveMeterAtMeasure(mei, 1)).toEqual({ count: "4", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 3)).toEqual({ count: "4", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 4)).toEqual({ count: "3", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 5)).toEqual({ count: "3", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 7)).toEqual({ count: "6", unit: "8", sym: null })
+    })
+
+    it("replaces the initial meter on scoreDef, staffDef and meterSig and drops stale sym attributes", () => {
+        const slice = '<mei><scoreDef meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><meterSig count="4" unit="4" sym="common"/></staffDef></staffGrp></scoreDef><section><scoreDef><meterSig count="2" unit="4"/></scoreDef></section></mei>'
+        const updated = applyInitialMeter(slice, { count: "6", unit: "8", sym: null })
+
+        expect(updated).toContain('<scoreDef meter.count="6" meter.unit="8">')
+        expect(updated).toContain('<staffDef n="1" meter.count="6" meter.unit="8">')
+        expect(updated).toContain('<meterSig count="6" unit="8"/>')
+        expect(updated).toContain('<scoreDef><meterSig count="2" unit="4"/></scoreDef>')
     })
 
     it("hides measure numbers on scoreDef and removes explicit mNum elements", () => {

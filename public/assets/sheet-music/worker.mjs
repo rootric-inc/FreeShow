@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -147,8 +147,10 @@ export async function handleMessage(message) {
             const rawSlice = tk.getMEI({ pageNo, removeIds: true })
             if (!rawSlice) throw createWorkerError("load_failed", "Could not extract music slice")
 
+            const activeMeter = startMeasure > 1 ? getActiveMeterAtMeasure(mei, startMeasure) : null
             const keepMeterVisible = startMeasure === 1 || hasMeterChangeAtMeasure(mei, startMeasure)
-            const adjustedMeter = keepMeterVisible ? rawSlice : hideInitialMeter(rawSlice)
+            const withActiveMeter = activeMeter ? applyInitialMeter(rawSlice, activeMeter) : rawSlice
+            const adjustedMeter = keepMeterVisible ? withActiveMeter : hideInitialMeter(withActiveMeter)
             const slicedMei = normalizeMei(adjustedMeter)
             const measures = countMeasures(slicedMei)
             if (measures === 0) throw createWorkerError("empty_music", "No music measures found")
@@ -161,21 +163,23 @@ export async function handleMessage(message) {
     }
 
     if (type === "render") {
-        const { mei, pageWidth, ratio } = message
+        const { mei, pageWidth, ratio, showMeasureNumbers } = message
         if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
         const clampedWidth = Math.max(MIN_PAGE_WIDTH, Math.min(MAX_PAGE_WIDTH, parsedWidth))
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
+        const drawMeasureNumbers = Boolean(showMeasureNumbers)
 
-        const renderMei = hideMeasureNumbers(mei)
+        const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
 
         try {
             const renderAt = (width) => {
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
+                const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, pageWidth: width }
+                tk.setOptions(renderOptions)
                 tk.getLog()
                 const loaded = tk.loadData(renderMei)
                 if (!loaded) {
@@ -203,7 +207,7 @@ export async function handleMessage(message) {
                 }
             }
 
-            const canonicalKey = `${targetRatio}:${mei}`
+            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
             const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt, { canonical: cachedCanonical })
             lastRenderLayouts = fitted.layouts

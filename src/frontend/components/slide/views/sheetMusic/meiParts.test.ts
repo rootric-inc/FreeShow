@@ -72,9 +72,12 @@ describe("getMeasureNumbers", () => {
         expect(getMeasureNumbers(split)).toEqual([1, 2, 2, 3])
     })
 
-    it("falls back to 1-based positions when numbers are missing, non-numeric or not rising", () => {
-        expect(getMeasureNumbers('<mei><section><measure n="1"/><measure /><measure n="3"/></section></mei>')).toEqual([1, 2, 3])
-        expect(getMeasureNumbers('<mei><section><measure n="1"/><measure n="2a"/><measure n="3"/></section></mei>')).toEqual([1, 2, 3])
+    it("treats missing or non-numeric measure numbers as part of the bar before them and falls back only when none are numeric or numbers go down", () => {
+        expect(getMeasureNumbers('<mei><section><measure n="1"/><measure n="2"/><measure n="X1"/><measure n="3"/><measure n="4"/><measure n="5"/></section></mei>')).toEqual([1, 2, 2, 3, 4, 5])
+        expect(getMeasureNumbers('<mei><section><measure n="1"/><measure /><measure n="3"/></section></mei>')).toEqual([1, 1, 3])
+        expect(getMeasureNumbers('<mei><section><measure n="1"/><measure n="2a"/><measure n="3"/></section></mei>')).toEqual([1, 1, 3])
+        expect(getMeasureNumbers('<mei><section><measure n="X1"/><measure n="1"/><measure n="2"/></section></mei>')).toEqual([1, 1, 2])
+        expect(getMeasureNumbers('<mei><section><measure /><measure n="X1"/></section></mei>')).toEqual([1, 2])
         expect(getMeasureNumbers('<mei><section><measure n="1"/><measure n="2"/><measure n="1"/></section></mei>')).toEqual([1, 2, 3])
         expect(getMeasureNumbers("")).toEqual([])
     })
@@ -198,6 +201,44 @@ describe("filterMei", () => {
         expect(filterMei(withRefrain, { parts: "all", verses: [4] })).toBe(withRefrain)
     })
 
+    it("drops a stray single-verse syllable inside a verse line while keeping refrains after or between verse lines", () => {
+        const unevenLine =
+            '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section>' +
+            '<measure n="1"><staff n="1"><layer n="1">' +
+            '<note dur="4" oct="5" pname="c"><verse n="1"><syl>Joy-</syl></verse><verse n="4"><syl>an-</syl></verse></note>' +
+            '<note dur="4" oct="5" pname="d"><verse n="4"><syl>wer,</syl></verse></note>' +
+            '<note dur="2" oct="5" pname="e"><verse n="1"><syl>ful</syl></verse><verse n="4"><syl>gels</syl></verse></note>' +
+            "</layer></staff></measure>" +
+            '<measure n="2"><staff n="1"><layer n="1">' +
+            '<note dur="1" oct="5" pname="f"><verse n="1"><syl>Hal-le-lu-jah!</syl></verse></note>' +
+            "</layer></staff></measure>" +
+            '<measure n="3"><staff n="1"><layer n="1">' +
+            '<note dur="1" oct="5" pname="g"><verse n="1"><syl>Rise</syl></verse><verse n="4"><syl>Sing</syl></verse></note>' +
+            "</layer></staff></measure>" +
+            '<measure n="4"><staff n="1"><layer n="1">' +
+            '<note dur="1" oct="5" pname="a"><verse n="1"><syl>A-men</syl></verse></note>' +
+            "</layer></staff></measure>" +
+            "</section></mei>"
+
+        // Verse 1 drops verse 4's stray "wer," in bar 1, keeps refrain bar 2 between verse lines, and keeps refrain bar 4 after verse lines
+        const verse1 = filterMei(unevenLine, { parts: "all", verses: [1] })
+        expect(verse1).toContain("Joy-")
+        expect(verse1).toContain("ful")
+        expect(verse1).not.toContain("wer,")
+        expect(verse1).toContain('<verse n="1"><syl>Hal-le-lu-jah!</syl></verse>')
+        expect(verse1).toContain("Rise")
+        expect(verse1).toContain('<verse n="1"><syl>A-men</syl></verse>')
+
+        // Verse 4 keeps its own "wer," in bar 1, keeps refrain bar 2 between verse lines on row 1, and keeps refrain bar 4 after verse lines on row 1
+        const verse4 = filterMei(unevenLine, { parts: "all", verses: [4] })
+        expect(verse4).toContain('<verse n="1"><syl>an-</syl></verse>')
+        expect(verse4).toContain('<verse n="1"><syl>wer,</syl></verse>')
+        expect(verse4).toContain('<verse n="1"><syl>gels</syl></verse>')
+        expect(verse4).toContain('<verse n="1"><syl>Hal-le-lu-jah!</syl></verse>')
+        expect(verse4).toContain('<verse n="1"><syl>Sing</syl></verse>')
+        expect(verse4).toContain('<verse n="1"><syl>A-men</syl></verse>')
+    })
+
     it("promotes a removed layer's written accidental onto the first matching accid.ges note in a kept layer", () => {
         const accidMei =
             '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section><measure n="1"><staff n="1">' +
@@ -214,7 +255,37 @@ describe("filterMei", () => {
         expect(keptLayer2).toContain('<accid accid.ges="s" accid="s" />')
     })
 
-    it("preserves clef changes from removed layers at the start of the same bar or the next bar", () => {
+    it("re-promotes a removed voice's accidental after an intervening cancellation and matches double-sharp and double-flat spellings", () => {
+        const cancelledMei =
+            '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section><measure n="1"><staff n="1">' +
+            '<layer n="1"><note xml:id="k1" dur="4" oct="5" pname="c" accid.ges="s" /><note xml:id="k2" dur="4" oct="5" pname="c" accid="n" /><note xml:id="k3" dur="4" oct="5" pname="c" accid.ges="s" /><note xml:id="k4" dur="4" oct="5" pname="c" accid.ges="s" /></layer>' +
+            '<layer n="2"><note dur="4" oct="5" pname="c" accid="s" /><note dur="4" oct="4" pname="c" /><note dur="2" oct="5" pname="c" accid="s" /></layer>' +
+            "</staff></measure></section></mei>"
+
+        const keptLayer1 = filterMei(cancelledMei, { parts: ["1.1"], verses: "all" })
+        expect(keptLayer1).toContain('<note xml:id="k1" dur="4" oct="5" pname="c" accid.ges="s" accid="s" />')
+        expect(keptLayer1).toContain('<note xml:id="k2" dur="4" oct="5" pname="c" accid="n" />')
+        expect(keptLayer1).toContain('<note xml:id="k3" dur="4" oct="5" pname="c" accid.ges="s" accid="s" />')
+        expect(keptLayer1).toContain('<note xml:id="k4" dur="4" oct="5" pname="c" accid.ges="s" />')
+
+        // Written "x" matches gestural "ss", and written "ff" matches gestural "ff"
+        const doubleAccidMei = '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section><measure n="1"><staff n="1">' + '<layer n="1"><note xml:id="ds1" dur="2" oct="4" pname="f"><accid accid.ges="ss" /></note><note xml:id="df1" dur="2" oct="4" pname="b" accid.ges="ff" /></layer>' + '<layer n="2"><note dur="2" oct="4" pname="f"><accid accid="x" accid.ges="ss" /></note><note dur="2" oct="4" pname="b" accid="ff" /></layer>' + "</staff></measure></section></mei>"
+
+        const keptDouble = filterMei(doubleAccidMei, { parts: ["1.1"], verses: "all" })
+        expect(keptDouble).toContain('<accid accid.ges="ss" accid="x" />')
+        expect(keptDouble).toContain('<note xml:id="df1" dur="2" oct="4" pname="b" accid.ges="ff" accid="ff" />')
+    })
+
+    it("promotes written accidentals from dropped chord notes when Melody collapses chords", () => {
+        const abc = ["M: 4/4", "L: 1/4", "K: C", "[D^FA] B A F | G4 |"].join("\n")
+        const converted = convertAndCheckAbc(abc, abcjs.parseOnly)
+
+        const melody = filterMei(converted.mei, { parts: ["1.1"], verses: "all", highestNoteOnly: true })
+        expect(melody).not.toContain("<chord")
+        expect(melody).toMatch(/<note[^>]*pname="f" oct="4"[^>]*accid="s"/)
+    })
+
+    it("preserves clef changes from removed layers at the start of the same bar, next bar, and inside beams", () => {
         const startClefMei = '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section>' + '<measure n="1"><staff n="1"><layer n="1"><clef xml:id="cl1" shape="F" line="4" /><note dur="1" oct="3" pname="c" /></layer><layer n="2"><note dur="1" oct="3" pname="e" /></layer></staff></measure>' + "</section></mei>"
         const keptSameBar = filterMei(startClefMei, { parts: ["1.2"], verses: "all" })
         expect(keptSameBar).toContain('<layer n="2"><clef xml:id="cl1" shape="F" line="4" /><note dur="1" oct="3" pname="e" /></layer>')
@@ -227,6 +298,14 @@ describe("filterMei", () => {
         const keptNextBar = filterMei(midBarClefMei, { parts: ["1.2"], verses: "all" })
         expect(keptNextBar).toContain('<measure n="1"><staff n="1"><layer n="2"><note dur="1" oct="4" pname="e" /></layer></staff></measure>')
         expect(keptNextBar).toContain('<measure n="2"><staff n="1"><layer n="2"><clef xml:id="cl2" shape="F" line="4" /><note dur="1" oct="3" pname="d" /></layer></staff></measure>')
+
+        const beamClefMei =
+            '<mei><scoreDef><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section>' +
+            '<measure n="1"><staff n="1"><layer n="1"><note dur="1" oct="5" pname="c" /></layer><layer n="2"><beam><note dur="8" oct="4" pname="e" /><clef xml:id="cl3" shape="F" line="4" /><note dur="8" oct="3" pname="e" /></beam><note dur="2" oct="3" pname="e" /></layer></staff></measure>' +
+            '<measure n="2"><staff n="1"><layer n="1"><note dur="1" oct="3" pname="c" /></layer><layer n="2"><note dur="1" oct="3" pname="f" /></layer></staff></measure>' +
+            "</section></mei>"
+        const keptBeamClef = filterMei(beamClefMei, { parts: ["1.1"], verses: "all" })
+        expect(keptBeamClef).toContain('<measure n="2"><staff n="1"><layer n="1"><clef xml:id="cl3" shape="F" line="4" /><note dur="1" oct="3" pname="c" /></layer></staff></measure>')
     })
 
     it("reduces chords to their highest note when highestNoteOnly is enabled", () => {

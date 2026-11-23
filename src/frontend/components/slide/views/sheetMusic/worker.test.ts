@@ -426,4 +426,48 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(harmXs).toHaveLength(1)
         expect(Math.abs(harmXs[0] - noteheadXs[1])).toBeLessThan(100)
     })
+
+    it("stores the active 6/8 meter after a 4/4 to 6/8 change when sliced from bar 3 and keeps tstamp marks on their note", async () => {
+        const dottedQuarter = (step: string) => `<note><pitch><step>${step}</step><octave>4</octave></pitch><duration>3</duration><type>quarter</type><dot/></note>`
+        const xml =
+            `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list><part id="P1">` +
+            `<measure number="1"><attributes><divisions>2</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>8</duration><type>whole</type></note></measure>` +
+            `<measure number="2"><attributes><time><beats>6</beats><beat-type>8</beat-type></time></attributes>${dottedQuarter("C")}${dottedQuarter("G")}</measure>` +
+            `<measure number="3">${dottedQuarter("C")}${dottedQuarter("G")}</measure>` +
+            `</part></score-partwise>`
+
+        const loaded = await handleMessage({ type: "load", text: xml })
+        let barCount = 0
+        const meiWithHarm = loaded.mei.replace(/<\/measure>/g, (match: string) => (++barCount === 3 ? `<harm staff="1" tstamp="4">G3</harm>${match}` : match))
+
+        const sliceFrom3 = await handleMessage({ type: "slice", mei: meiWithHarm, first: 3, last: 3 })
+        expect(sliceFrom3.mei).toContain('count="6"')
+        expect(sliceFrom3.mei).toContain('unit="8"')
+        expect(sliceFrom3.mei).toContain('visible="false"')
+        expect(sliceFrom3.mei).not.toContain('count="4"')
+
+        const rendered = await handleMessage({ type: "render", mei: sliceFrom3.mei, pageWidth: 1840 })
+        expect(hasVisibleMeterSig(rendered.svg)).toBe(false)
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+
+        const noteheadXs = [...rendered.svg.matchAll(/class="notehead"[^>]*>\s*<use[^>]*transform="translate\((\d+)/g)].map((m) => Number(m[1]))
+        const harmXs = [...rendered.svg.matchAll(/class="harm"[\s\S]*?<text[^>]*x="(\d+)"/g)].map((m) => Number(m[1]))
+        expect(noteheadXs).toHaveLength(2)
+        expect(harmXs).toHaveLength(1)
+        expect(Math.abs(harmXs[0] - noteheadXs[1])).toBeLessThan(100)
+    })
+
+    it("draws a measure number on every bar of a 16-bar score when showMeasureNumbers is true and none by default", async () => {
+        const bars = Array.from({ length: 16 }, (_, i) => `<measure n="${i + 1}"><staff n="1"><layer n="1"><note dur="1" oct="4" pname="c" /></layer></staff></measure>`).join("")
+        const sixteenBarsMei = `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2" /></staffGrp></scoreDef><section>${bars}</section></score></mdiv></body></music></mei>`
+
+        const defaultRender = await handleMessage({ type: "render", mei: sixteenBarsMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(defaultRender.svg).not.toMatch(/class="[^"]*\bmNum\b[^"]*"/)
+
+        const numberedRender = await handleMessage({ type: "render", mei: sixteenBarsMei, pageWidth: 1840, showMeasureNumbers: true })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        const drawnNumbers = [...numberedRender.svg.matchAll(/<g[^>]*class="[^"]*\bmNum\b[^"]*"[^>]*>[\s\S]*?<\/g>/g)].map((match) => match[0].replace(/<[^>]+>/g, "").trim())
+        expect(drawnNumbers).toEqual(Array.from({ length: 16 }, (_, i) => String(i + 1)))
+    })
 })

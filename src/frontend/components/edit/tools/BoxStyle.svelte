@@ -436,7 +436,12 @@
                         }
                     ]
                 })
-                defaultSection.inputs = [...baseInputs, ...partRows]
+                const partsRowIndex = baseInputs.findIndex((row) => row.some((entry) => entry?.id === "sheet_music.parts"))
+                if (partsRowIndex !== -1) {
+                    defaultSection.inputs = [...baseInputs.slice(0, partsRowIndex + 1), ...partRows, ...baseInputs.slice(partsRowIndex + 1)]
+                } else {
+                    defaultSection.inputs = [...baseInputs, ...partRows]
+                }
             } else {
                 defaultSection.inputs = baseInputs
             }
