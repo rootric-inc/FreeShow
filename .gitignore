@@ -7,6 +7,8 @@
 /public/release.json
 /public/assets/sheet-music/verovio-module.mjs
 /public/assets/sheet-music/verovio.mjs
+/public/assets/sheet-music/abcjs-basic-min.js
+/public/assets/sheet-music/abcjs-basic-min.js.LICENSE
 /public/*.js.map
 /public/*.ts
 /build/
