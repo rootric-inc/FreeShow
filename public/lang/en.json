@@ -350,7 +350,7 @@
         "sheet_music_empty": "No music found in this file",
         "sheet_music_render": "Could not draw this music",
         "sheet_music_timeout": "Sheet music engine did not answer in time",
-        "sheet_music_truncated": "This music is too long for one item",
+        "sheet_music_truncated": "This music is too long for this item",
         "media": "Could not find media",
         "bible": "Could not find local scripture",
         "import": "Could not import",

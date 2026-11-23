@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, normalizeMei, sanitizeSvgUrls } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -18,7 +18,15 @@ const RENDER_OPTIONS = {
     pageMarginRight: 50
 }
 
+const MAX_CANONICAL_MEMO = 8
+const canonicalMemo = new Map()
+
 let toolkitPromise = null
+let lastRenderLayouts = 0
+
+export function getLastRenderLayouts() {
+    return lastRenderLayouts
+}
 
 function getToolkit() {
     if (!toolkitPromise) {
@@ -33,6 +41,24 @@ function getToolkit() {
             })
     }
     return toolkitPromise
+}
+
+function getCanonicalMemo(key) {
+    const entry = canonicalMemo.get(key)
+    if (!entry) return null
+    canonicalMemo.delete(key)
+    canonicalMemo.set(key, entry)
+    return entry
+}
+
+function setCanonicalMemo(key, entry) {
+    if (canonicalMemo.has(key)) {
+        canonicalMemo.delete(key)
+    } else if (canonicalMemo.size >= MAX_CANONICAL_MEMO) {
+        const oldest = canonicalMemo.keys().next().value
+        if (oldest !== undefined) canonicalMemo.delete(oldest)
+    }
+    canonicalMemo.set(key, entry)
 }
 
 function formatError(err, fallback) {
@@ -98,32 +124,59 @@ export async function handleMessage(message) {
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
 
         try {
-            let loadedOnce = false
             const renderAt = (width) => {
-                if (!loadedOnce) {
-                    tk.resetOptions()
-                    tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
-                    const loaded = tk.loadData(mei)
-                    if (!loaded) throw createWorkerError("render_failed", "Could not render music")
-                    loadedOnce = true
-                } else {
-                    tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
-                    tk.redoLayout()
-                }
+                // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
+                tk.resetOptions()
+                tk.resetXmlIdSeed(1)
+                tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
+                const loaded = tk.loadData(mei)
+                if (!loaded) throw createWorkerError("render_failed", "Could not render music")
 
                 const svg = tk.renderToSVG(1)
                 if (!svg) throw createWorkerError("render_failed", "Could not render music")
-                const pageCount = tk.getPageCount()
-                return { svg, pageCount }
+                const pages = tk.getPageCount()
+                return { svg, pages }
             }
 
             if (targetRatio === null) {
-                const { svg, pageCount } = renderAt(clampedWidth)
-                return { svg: sanitizeSvgUrls(svg), pageWidth: clampedWidth, truncated: pageCount > 1 }
+                lastRenderLayouts = 1
+                const { svg, pages } = renderAt(clampedWidth)
+                const cleanSvg = sanitizeSvg(svg)
+                return {
+                    svg: cleanSvg,
+                    pageWidth: clampedWidth,
+                    scale: 1,
+                    fits: pages <= 1 && svgFitsWidth(cleanSvg),
+                    pages
+                }
             }
 
-            const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt)
-            return { svg: sanitizeSvgUrls(fitted.svg), pageWidth: fitted.pageWidth, truncated: fitted.truncated }
+            const canonicalKey = `${targetRatio}:${mei}`
+            const cachedCanonical = getCanonicalMemo(canonicalKey)
+            const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt, { canonical: cachedCanonical })
+            lastRenderLayouts = fitted.layouts
+
+            if (!cachedCanonical && fitted.canonical && !fitted.canonical.timedOut) {
+                const cleanCanonicalSvg = sanitizeSvg(fitted.canonical.svg)
+                setCanonicalMemo(canonicalKey, {
+                    svg: cleanCanonicalSvg,
+                    pageWidth: fitted.canonical.pageWidth,
+                    pages: fitted.canonical.pages,
+                    fits: fitted.canonical.fits,
+                    canonicalLayouts: fitted.canonical.canonicalLayouts,
+                    timedOut: false
+                })
+            }
+
+            const svg = cachedCanonical && fitted.svg === cachedCanonical.svg ? cachedCanonical.svg : sanitizeSvg(fitted.svg)
+            const scale = Math.min(1, clampedWidth / fitted.pageWidth)
+            return {
+                svg,
+                pageWidth: fitted.pageWidth,
+                scale,
+                fits: fitted.fits,
+                pages: fitted.pages
+            }
         } catch (err) {
             if (err && typeof err === "object" && typeof err.code === "string") throw err
             throw createWorkerError("render_failed", formatError(err, "Could not render music"))

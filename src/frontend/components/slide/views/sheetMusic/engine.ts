@@ -10,7 +10,9 @@ export interface LoadMusicResult {
 
 export interface RenderMusicResult {
     svg: string
-    truncated: boolean
+    scale: number
+    fits: boolean
+    pages: number
 }
 
 export type SheetMusicErrorCode = "load_failed" | "empty_music" | "render_failed" | "timeout" | "aborted"
@@ -68,11 +70,12 @@ const WORKER_URL = "./assets/sheet-music/worker.mjs"
 export const RENDER_TIMEOUT_MS = 20_000
 export const LOAD_TIMEOUT_MS = 30_000
 export const IDLE_TIMEOUT_MS = 60_000
+export const TIMED_OUT_KEY_TTL_MS = 60_000
 const MAX_TIMED_OUT_KEYS = 64
 
 const svgCache = new SvgCache<RenderMusicResult>(SVG_CACHE_MAX_BYTES, (entry) => entry.svg.length)
 const inFlightRenders = new Map<string, QueuedJob<RenderMusicResult>>()
-const timedOutKeys = new Set<string>()
+const timedOutKeys = new Map<string, number>()
 const queue: QueuedJob[] = []
 
 let worker: Worker | null = null
@@ -100,14 +103,41 @@ function clearActiveTimer(): void {
     }
 }
 
+function terminateWorker(): void {
+    clearIdleTimer()
+    clearActiveTimer()
+
+    if (worker) {
+        const current = worker
+        worker = null
+        current.terminate()
+    }
+}
+
 function rememberTimedOutKey(key: string): void {
+    const now = Date.now()
     if (timedOutKeys.has(key)) {
         timedOutKeys.delete(key)
     } else if (timedOutKeys.size >= MAX_TIMED_OUT_KEYS) {
-        const oldest = timedOutKeys.values().next().value
-        if (oldest !== undefined) timedOutKeys.delete(oldest)
+        for (const [existingKey, expiresAt] of timedOutKeys) {
+            if (expiresAt <= now) timedOutKeys.delete(existingKey)
+        }
+        if (timedOutKeys.size >= MAX_TIMED_OUT_KEYS) {
+            const oldest = timedOutKeys.keys().next().value
+            if (oldest !== undefined) timedOutKeys.delete(oldest)
+        }
     }
-    timedOutKeys.add(key)
+    timedOutKeys.set(key, now + TIMED_OUT_KEY_TTL_MS)
+}
+
+function isKeyTimedOut(key: string): boolean {
+    const expiresAt = timedOutKeys.get(key)
+    if (expiresAt === undefined) return false
+    if (Date.now() >= expiresAt) {
+        timedOutKeys.delete(key)
+        return false
+    }
+    return true
 }
 
 function scheduleIdleTermination(): void {
@@ -117,8 +147,9 @@ function scheduleIdleTermination(): void {
     idleTimer = setTimeout(() => {
         idleTimer = null
         if (worker && activeJob === null && queue.length === 0) {
-            worker.terminate()
+            const current = worker
             worker = null
+            current.terminate()
         }
     }, IDLE_TIMEOUT_MS)
 }
@@ -148,13 +179,7 @@ function releaseInFlight(job: QueuedJob): void {
 }
 
 function failWorker(error: SheetMusicError): void {
-    clearIdleTimer()
-    clearActiveTimer()
-
-    if (worker) {
-        worker.terminate()
-        worker = null
-    }
+    terminateWorker()
 
     const jobs: QueuedJob[] = []
     if (activeJob) {
@@ -180,7 +205,7 @@ function ensureWorker(): Worker {
         created = new Worker(WORKER_URL, { type: "module" })
     } catch (err) {
         const detail = err instanceof Error && err.message ? `: ${err.message}` : ""
-        throw new SheetMusicError("load_failed", `Could not start sheet music worker${detail}`)
+        throw new Error(`Could not start sheet music worker${detail}`)
     }
 
     created.onmessage = (event: MessageEvent<WorkerReply<any>>) => {
@@ -196,7 +221,16 @@ function ensureWorker(): Worker {
 
         if (reply.ok) {
             if (finished.type === "render" && finished.cacheKey) {
-                const renderResult: RenderMusicResult = { svg: reply.result.svg, truncated: Boolean(reply.result.truncated) }
+                const rawScale = Number(reply.result?.scale)
+                const scale = Number.isFinite(rawScale) && rawScale > 0 ? Math.min(1, rawScale) : 1
+                const rawPages = Number(reply.result?.pages)
+                const pages = Number.isFinite(rawPages) && rawPages >= 1 ? Math.floor(rawPages) : 1
+                const renderResult: RenderMusicResult = {
+                    svg: reply.result.svg,
+                    scale,
+                    fits: Boolean(reply.result?.fits),
+                    pages
+                }
                 svgCache.set(finished.cacheKey, renderResult)
                 settleJobSuccess(finished, renderResult)
             } else {
@@ -245,10 +279,9 @@ function pumpQueue(): void {
         } catch (err) {
             const code: SheetMusicErrorCode = next.type === "load" ? "load_failed" : "render_failed"
             const message = err instanceof Error && err.message ? err.message : "Could not start sheet music worker"
-            const workerError = err instanceof SheetMusicError ? err : new SheetMusicError(code, message)
-            releaseInFlight(next)
-            settleJobError(next, workerError)
-            continue
+            activeJob = next
+            failWorker(new SheetMusicError(code, message))
+            return
         }
 
         const id = nextRequestId++
@@ -258,8 +291,12 @@ function pumpQueue(): void {
         activeTimer = setTimeout(() => {
             activeTimer = null
             if (activeJob !== next) return
+            activeJob = null
             if (next.cacheKey) rememberTimedOutKey(next.cacheKey)
-            failWorker(new SheetMusicError("timeout", "Sheet music engine timed out"))
+            terminateWorker()
+            releaseInFlight(next)
+            settleJobError(next, new SheetMusicError("timeout", "Sheet music engine timed out"))
+            pumpQueue()
         }, next.timeoutMs)
 
         try {
@@ -297,11 +334,18 @@ function attachWaiter<T>(job: QueuedJob<T>, signal?: AbortSignal): Promise<T> {
             waiter.cleanup()
             reject(new SheetMusicError("aborted", "Sheet music request cancelled"))
 
-            if (job.waiters.size === 0 && job !== activeJob) {
-                const index = queue.indexOf(job)
-                if (index !== -1) queue.splice(index, 1)
-                releaseInFlight(job)
-                if (activeJob === null && queue.length === 0) scheduleIdleTermination()
+            if (job.waiters.size === 0) {
+                if (job === activeJob) {
+                    activeJob = null
+                    terminateWorker()
+                    releaseInFlight(job)
+                    pumpQueue()
+                } else {
+                    const index = queue.indexOf(job)
+                    if (index !== -1) queue.splice(index, 1)
+                    releaseInFlight(job)
+                    if (activeJob === null && queue.length === 0) scheduleIdleTermination()
+                }
             }
         }
 
@@ -338,7 +382,7 @@ export function renderMusic(mei: string, pageWidth: number, ratio?: number, sign
     const validRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : undefined
     const key = createRenderCacheKey(mei, pageWidth, validRatio)
 
-    if (timedOutKeys.has(key)) {
+    if (isKeyTimedOut(key)) {
         return Promise.reject(new SheetMusicError("timeout", "Sheet music render timed out"))
     }
 

@@ -86,7 +86,7 @@
             const result = await renderMusic(mei, calculatePageWidth(PREVIEW_ITEM_WIDTH, size), undefined, controller.signal)
             if (destroyed || token !== requestToken) return
             previewSvg = prefixSvgIds(result.svg, "sm_popup_")
-            truncated = result.truncated
+            truncated = result.pages > 1
         } catch (err) {
             if (err instanceof SheetMusicError && err.code === "aborted") return
             if (destroyed || token !== requestToken) return
@@ -123,7 +123,7 @@
             const label = loaded.title || removeExtension(getFileName(filePath))
             current = { ...current, data: loaded.mei, label }
             previewSvg = prefixSvgIds(rendered.svg, "sm_popup_")
-            truncated = rendered.truncated
+            truncated = rendered.pages > 1
 
             if ($popupData.trigger) {
                 $popupData.trigger({ ...current })

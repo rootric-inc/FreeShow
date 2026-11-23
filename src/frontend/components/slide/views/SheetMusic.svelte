@@ -93,7 +93,7 @@
             if (destroyed || token !== renderToken) return
 
             svg = prefixSvgIds(result.svg, instancePrefix)
-            truncated = result.truncated
+            truncated = !result.fits || result.pages > 1 || result.scale < 0.5
             hasRendered = true
             renderError = false
         } catch (err) {
@@ -116,7 +116,7 @@
         <div class="score">
             {@html svg}
         </div>
-        {#if edit && truncated}
+        {#if edit && !isOutput && truncated}
             <div class="truncatedBadge">
                 <Icon id="warning" size={0.9} white />
                 <span><T id="error.sheet_music_truncated" /></span>
