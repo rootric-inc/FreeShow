@@ -170,12 +170,13 @@
         if (!source.trim()) {
             cancelPending()
             requestToken++
+            previewSvg = ""
             problems = []
             noteRanges = []
             truncated = false
             loading = false
             error = ""
-            hasAbcError = Boolean(previewSvg)
+            hasAbcError = false
             applyHighlight("")
             dispatch("result", { text: "", analysis: null, userEdit })
             return

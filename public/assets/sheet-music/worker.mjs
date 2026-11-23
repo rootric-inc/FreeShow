@@ -181,72 +181,99 @@ export async function handleMessage(message) {
         const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
 
         try {
-            const renderAt = (width) => {
-                const runLayout = (minLastJustification) => {
-                    // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
-                    tk.resetOptions()
-                    tk.resetXmlIdSeed(1)
-                    const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, minLastJustification, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
-                    tk.setOptions(renderOptions)
-                    tk.getLog()
-                    const loaded = tk.loadData(renderMei)
-                    if (!loaded) {
-                        lastRenderLog = tk.getLog().trim()
-                        throw createWorkerError("render_failed", "Could not render music")
-                    }
-
-                    const svg = tk.renderToSVG(1)
+            let layoutCount = 0
+            const runLayout = (width, minLastJustification) => {
+                layoutCount++
+                // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
+                tk.resetOptions()
+                tk.resetXmlIdSeed(1)
+                const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, minLastJustification, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                tk.setOptions(renderOptions)
+                tk.getLog()
+                const loaded = tk.loadData(renderMei)
+                if (!loaded) {
                     lastRenderLog = tk.getLog().trim()
-                    if (!svg) throw createWorkerError("render_failed", "Could not render music")
-                    const pages = tk.getPageCount()
-                    return { svg, pages }
+                    throw createWorkerError("render_failed", "Could not render music")
                 }
 
-                const initial = runLayout(RENDER_OPTIONS.minLastJustification)
-                if (initial.pages > 1 || countSvgSystems(initial.svg) > 1) {
-                    return runLayout(MULTI_ROW_MIN_LAST_JUSTIFICATION)
+                const svg = tk.renderToSVG(1)
+                lastRenderLog = tk.getLog().trim()
+                if (!svg) throw createWorkerError("render_failed", "Could not render music")
+                const pages = tk.getPageCount()
+                return { svg, pages }
+            }
+
+            const renderSearchAt = (width) => runLayout(width, RENDER_OPTIONS.minLastJustification)
+
+            const finalizeLayout = (result, width) => {
+                if (result.pages > 1 || countSvgSystems(result.svg) > 1) {
+                    return runLayout(width, MULTI_ROW_MIN_LAST_JUSTIFICATION)
                 }
-                return initial
+                return result
             }
 
             if (targetRatio === null) {
-                lastRenderLayouts = 1
-                const { svg, pages } = renderAt(clampedWidth)
-                const cleanSvg = sanitizeSvg(svg)
+                const initial = renderSearchAt(clampedWidth)
+                const finalResult = finalizeLayout(initial, clampedWidth)
+                lastRenderLayouts = layoutCount
+                const cleanSvg = sanitizeSvg(finalResult.svg)
                 return {
                     svg: cleanSvg,
                     pageWidth: clampedWidth,
                     scale: 1,
-                    fits: pages <= 1 && svgFitsWidth(cleanSvg),
-                    pages
+                    fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg),
+                    pages: finalResult.pages
                 }
             }
 
             const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
-            const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt, { canonical: cachedCanonical })
-            lastRenderLayouts = fitted.layouts
+            const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical })
+
+            const usedCachedCanonical = Boolean(cachedCanonical && fitted.svg === cachedCanonical.svg)
+            const usedFreshCanonical = Boolean(!cachedCanonical && fitted.canonical && fitted.svg === fitted.canonical.svg)
+
+            let finalSvg
+            let finalPages = fitted.pages
+
+            if (usedCachedCanonical) {
+                finalSvg = cachedCanonical.svg
+                finalPages = cachedCanonical.pages
+            } else {
+                const finalized = finalizeLayout({ svg: fitted.svg, pages: fitted.pages }, fitted.pageWidth)
+                finalSvg = sanitizeSvg(finalized.svg)
+                finalPages = finalized.pages
+            }
 
             if (!cachedCanonical && fitted.canonical && !fitted.canonical.timedOut) {
-                const cleanCanonicalSvg = sanitizeSvg(fitted.canonical.svg)
+                let cleanCanonicalSvg
+                let canonicalPages = fitted.canonical.pages
+                if (usedFreshCanonical) {
+                    cleanCanonicalSvg = finalSvg
+                    canonicalPages = finalPages
+                } else {
+                    const finalizedCanonical = finalizeLayout({ svg: fitted.canonical.svg, pages: fitted.canonical.pages }, fitted.canonical.pageWidth)
+                    cleanCanonicalSvg = sanitizeSvg(finalizedCanonical.svg)
+                    canonicalPages = finalizedCanonical.pages
+                }
                 setCanonicalMemo(canonicalKey, {
                     svg: cleanCanonicalSvg,
                     pageWidth: fitted.canonical.pageWidth,
-                    pages: fitted.canonical.pages,
+                    pages: canonicalPages,
                     fits: fitted.canonical.fits,
                     canonicalLayouts: fitted.canonical.canonicalLayouts,
                     timedOut: false
                 })
             }
 
-            const svg = cachedCanonical && fitted.svg === cachedCanonical.svg ? cachedCanonical.svg : sanitizeSvg(fitted.svg)
+            lastRenderLayouts = layoutCount
             const scale = Math.min(1, clampedWidth / fitted.pageWidth)
             return {
-                svg,
+                svg: finalSvg,
                 pageWidth: fitted.pageWidth,
                 scale,
                 fits: fitted.fits,
-                pages: fitted.pages
+                pages: finalPages
             }
         } catch (err) {
             if (err && typeof err === "object" && typeof err.code === "string") throw err

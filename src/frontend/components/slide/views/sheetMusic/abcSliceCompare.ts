@@ -14,7 +14,8 @@ interface ParsedBarState {
 interface ParsedNoteItem {
     pname: string
     oct: string
-    accid: string
+    drawn: string
+    sounding: string
 }
 
 interface ParsedEvent {
@@ -75,10 +76,13 @@ function formatMeter(attrs: Record<string, string>): string {
 }
 
 function parseNoteItem(attrs: Record<string, string>): ParsedNoteItem {
+    const drawn = attrs.accid || ""
+    const sounding = drawn || attrs["accid.ges"] || "n"
     return {
         pname: attrs.pname || "",
         oct: attrs.oct || "",
-        accid: attrs.accid || attrs["accid.ges"] || "n"
+        drawn,
+        sounding
     }
 }
 

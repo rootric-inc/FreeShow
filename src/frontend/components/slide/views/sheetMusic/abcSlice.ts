@@ -1,10 +1,10 @@
-import type { KeySignature, Meter, NotePitch } from "abcjs"
+import type { KeySignature, Meter } from "abcjs"
 import type { RawAbcElem } from "./abcChecks"
-import { findSecondTuneLine, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, parseAbcTunes, splitVoiceIntoMeasures } from "./abcChecks"
+import { findSecondTuneLine, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, parseAbcTunes, splitTuneIntoMeasures } from "./abcChecks"
 import type { AbcParseOnly } from "./abcjs"
 import { KEY_TOKEN_PATTERN, normalizeLineEndings, updateAbcHeaderField } from "./abcSource"
-import type { AbcAnalysisResult } from "./abcToMei"
-import { convertAndCheckAbc } from "./abcToMei"
+import type { AbcAnalysisResult, RawNotePitch } from "./abcToMei"
+import { PITCH_NAMES, convertAndCheckAbc, createTuneAccidentalTracker, getKeyAccidentalMap } from "./abcToMei"
 
 export interface AbcMetadata {
     title?: string
@@ -17,11 +17,6 @@ export interface AbcMetadata {
 export interface AbcSystemSlice {
     abc: string
     analysis: AbcAnalysisResult
-}
-
-interface RawNotePitch extends NotePitch {
-    startTie?: unknown
-    endTie?: unknown
 }
 
 interface VoiceHeaderSettings {
@@ -40,9 +35,17 @@ interface PreparedAbcSlice {
     hideInitialMeter: boolean
 }
 
-const PITCH_NAMES = "cdefgab"
-const ACCIDENTAL_CODES: Record<string, string> = { sharp: "s", flat: "f", natural: "n", dblsharp: "x", dblflat: "ff" }
 const MEI_TO_ABC_ACCIDENTAL: Record<string, string> = { s: "^", f: "_", n: "=", x: "^^", ff: "__" }
+const BAR_TYPE_TO_ABC: Record<string, string> = {
+    bar_thin: "|",
+    bar_thin_thin: "||",
+    bar_thin_thick: "|]",
+    bar_right_repeat: ":|",
+    bar_dbl_repeat: "::"
+}
+const KEY_ACCIDENTAL_TOKEN = /^(?:exp|(?:(?:\^\^|\^|__|_|=)[A-Ga-g])+)$/i
+const CREDIT_LABEL_PATTERN = /\b(words|text|music\s+and\s+setting|music|tune|setting)\s*:/gi
+const INLINE_FIELD_ONLY_LINE = /^(?:\[[A-Za-z]:[^\]]*\]\s*)+$/
 
 function stripInlineComment(line: string): string {
     return line.replace(/(?<!\\)%.*$/, "").trim()
@@ -103,14 +106,108 @@ function getDefaultLengthForMeter(meterText: string): string {
     return numerator / denominator < 0.75 ? "1/16" : "1/8"
 }
 
-function getKeyAccidentalMap(key: KeySignature | undefined): Record<string, string> {
-    const map: Record<string, string> = {}
-    if (key && key.accidentals) {
-        for (const item of key.accidentals) {
-            map[item.note.toLowerCase()] = item.acc === "flat" ? "f" : item.acc === "sharp" ? "s" : "n"
+function parseKeySpec(rawBody: string): string {
+    const trimmed = rawBody.trim()
+    if (!trimmed) return ""
+    const match = KEY_TOKEN_PATTERN.exec(trimmed)
+    if (!match) return ""
+    const head = match[0].replace(/\s+/g, " ").trim()
+    const restTokens = trimmed
+        .slice(match[0].length)
+        .trim()
+        .split(/\s+/)
+        .filter((token) => KEY_ACCIDENTAL_TOKEN.test(token))
+    return restTokens.length ? `${head} ${restTokens.join(" ")}` : head
+}
+
+function replaceKeyLineValue(line: string, newKeySpec: string): string {
+    const match = /^(\s*K:\s*)([^%\n]*?)(\s*%.*)?$/.exec(line)
+    if (!match) return line
+    const prefix = match[1]
+    const body = match[2].trim()
+    const comment = match[3] || ""
+    const keyMatch = KEY_TOKEN_PATTERN.exec(body)
+    const afterKey = keyMatch ? body.slice(keyMatch[0].length).trim() : body
+    const keptParams = afterKey
+        .split(/\s+/)
+        .filter((token) => token && !KEY_ACCIDENTAL_TOKEN.test(token))
+        .join(" ")
+    const combined = keptParams ? `${newKeySpec} ${keptParams}` : newKeySpec
+    return `${prefix}${combined}${comment}`
+}
+
+function updateSliceKeyLine(headerText: string, newKeySpec: string): string {
+    const cleanValue = newKeySpec.trim()
+    if (!cleanValue) return headerText
+    const lines = headerText.split("\n")
+    let inBlock = false
+    for (let index = 0; index < lines.length; index++) {
+        const trimmed = lines[index].trim()
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = true
+            continue
+        }
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = false
+            continue
+        }
+        if (inBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (/^\s*K:/.test(lines[index])) {
+            lines[index] = replaceKeyLineValue(lines[index], cleanValue)
+            return lines.join("\n")
         }
     }
-    return map
+    return updateAbcHeaderField(headerText, "K", cleanValue)
+}
+
+function extractKeyTextFromElement(element: RawAbcElem, normalized: string): string {
+    if (element.startChar !== undefined && element.endChar !== undefined && element.endChar > element.startChar) {
+        const raw = normalized.slice(element.startChar, element.endChar).trim()
+        const inlineMatch = /^\[K:([^\]]*)\]/.exec(raw)
+        if (inlineMatch) return parseKeySpec(stripInlineComment(inlineMatch[1]))
+        const lineMatch = /^K:(.*)$/.exec(raw)
+        if (lineMatch) return parseKeySpec(stripInlineComment(lineMatch[1]))
+    }
+    return ""
+}
+
+function getLastHeaderVoiceAfterKey(sliceHeader: string[]): string | null {
+    let seenKey = false
+    let inBlock = false
+    let lastVoice: string | null = null
+    for (const line of sliceHeader) {
+        const trimmed = line.trim()
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = true
+            continue
+        }
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = false
+            continue
+        }
+        if (inBlock || !trimmed || trimmed.startsWith("%")) continue
+        const clean = stripInlineComment(line)
+        if (/^K:/.test(clean)) {
+            seenKey = true
+            lastVoice = null
+            continue
+        }
+        if (seenKey) {
+            const voiceMatch = /^V:\s*([^\s]+)/.exec(clean)
+            if (voiceMatch) lastVoice = voiceMatch[1]
+        }
+    }
+    return lastVoice
+}
+
+function appendClosingBarToRow(rowText: string, barToken: string | undefined): string {
+    if (!barToken) return rowText
+    const match = /^((?:\\.|[^%\n\\])*?)(\s*\\\s*)?(\s*(?<!\\)%.*)?$/.exec(rowText)
+    if (!match) return `${rowText} ${barToken}`
+    const body = match[1]
+    const continuation = match[2] || ""
+    const comment = match[3] || ""
+    return `${body.trimEnd()} ${barToken}${continuation}${comment}`
 }
 
 function parseClefAndOctave(paramText: string): VoiceHeaderSettings {
@@ -263,8 +360,50 @@ function applyRowInjections(rowText: string, injections: readonly AccidentalInje
 export function extractAbcMetadata(abc: string): AbcMetadata {
     const normalized = normalizeLineEndings(abc)
     const lines = normalized.split("\n")
-    const secondTuneLine = findSecondTuneLine(lines)
-    const endLine = secondTuneLine >= 0 ? secondTuneLine : lines.length
+
+    let firstXLine = -1
+    let inBlock = false
+    for (let index = 0; index < lines.length; index++) {
+        const trimmed = lines[index].trim()
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = true
+            continue
+        }
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = false
+            continue
+        }
+        if (inBlock) continue
+        if (/^X:/.test(trimmed)) {
+            firstXLine = index
+            break
+        }
+    }
+
+    const startLine = firstXLine >= 0 ? firstXLine : 0
+    let endLine = lines.length
+    if (firstXLine >= 0) {
+        inBlock = false
+        for (let index = firstXLine + 1; index < lines.length; index++) {
+            const trimmed = lines[index].trim()
+            if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+                inBlock = true
+                continue
+            }
+            if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+                inBlock = false
+                continue
+            }
+            if (inBlock) continue
+            if (/^X:/.test(trimmed)) {
+                endLine = index
+                break
+            }
+        }
+    } else {
+        const secondTuneLine = findSecondTuneLine(lines)
+        if (secondTuneLine >= 0) endLine = secondTuneLine
+    }
 
     let title = ""
     let author = ""
@@ -272,64 +411,68 @@ export function extractAbcMetadata(abc: string): AbcMetadata {
     let fallbackComposer = ""
     let copyright = ""
     let key = ""
-    let inTextBlock = false
-    let headerEnded = false
+    inBlock = false
 
-    for (let index = 0; index < endLine; index++) {
+    for (let index = startLine; index < endLine; index++) {
         const line = lines[index]
         const trimmed = line.trim()
-        if (/^%%begintext\b/i.test(trimmed)) {
-            inTextBlock = true
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = true
             continue
         }
-        if (/^%%endtext\b/i.test(trimmed)) {
-            inTextBlock = false
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = false
             continue
         }
-        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (inBlock || !trimmed || trimmed.startsWith("%")) continue
 
         const cleanLine = stripInlineComment(line)
-        if (!headerEnded) {
-            if (!title && /^T:/.test(cleanLine)) {
-                title = cleanLine.slice(2).trim()
+        if (!/^[A-Za-z+]:/.test(cleanLine)) break
+
+        if (!title && /^T:/.test(cleanLine)) {
+            title = cleanLine.slice(2).trim()
+            continue
+        }
+        if (/^C:/.test(cleanLine)) {
+            const value = cleanLine.slice(2).trim()
+            if (!value) continue
+            if (/^copyright:/i.test(value)) {
+                const text = value.replace(/^copyright:\s*/i, "").trim()
+                if (text && !copyright) copyright = text
                 continue
             }
-            if (/^C:/.test(cleanLine)) {
-                const value = cleanLine.slice(2).trim()
-                if (!value) continue
-                if (/^copyright:/i.test(value)) {
-                    const text = value.replace(/^copyright:\s*/i, "").trim()
-                    if (text && !copyright) copyright = text
-                    continue
-                }
-                if (/^(?:words|music|setting):/i.test(value)) {
-                    const segments = value.split(/(?=\b(?:words|music|setting):)/i)
-                    for (const segment of segments) {
-                        const trimmedSegment = segment.trim()
-                        if (/^words:/i.test(trimmedSegment)) {
-                            const text = trimmedSegment.replace(/^words:\s*/i, "").trim()
-                            if (text && !author) author = text
-                        } else if (/^music:/i.test(trimmedSegment)) {
-                            const text = trimmedSegment.replace(/^music:\s*/i, "").trim()
-                            if (text && !explicitComposer) explicitComposer = text
-                        }
+            CREDIT_LABEL_PATTERN.lastIndex = 0
+            const matches: { label: string; index: number; end: number }[] = []
+            let labelMatch: RegExpExecArray | null
+            while ((labelMatch = CREDIT_LABEL_PATTERN.exec(value)) !== null) {
+                matches.push({
+                    label: labelMatch[1].toLowerCase().replace(/\s+/g, " "),
+                    index: labelMatch.index,
+                    end: labelMatch.index + labelMatch[0].length
+                })
+            }
+            if (matches.length > 0) {
+                for (let matchIdx = 0; matchIdx < matches.length; matchIdx++) {
+                    const current = matches[matchIdx]
+                    const segmentEnd = matchIdx + 1 < matches.length ? matches[matchIdx + 1].index : value.length
+                    const text = value.slice(current.end, segmentEnd).trim()
+                    if (!text) continue
+                    if ((current.label === "words" || current.label === "text") && !author) {
+                        author = text
+                    } else if ((current.label === "music" || current.label === "music and setting" || current.label === "tune") && !explicitComposer) {
+                        explicitComposer = text
                     }
-                    continue
                 }
-                if (!fallbackComposer) fallbackComposer = value
                 continue
             }
-            if (/^K:/.test(cleanLine)) {
-                const rawKey = cleanLine.slice(2).trim()
-                const tokenMatch = KEY_TOKEN_PATTERN.exec(rawKey)
-                const token = tokenMatch ? tokenMatch[0].replace(/\s+/g, " ").trim() : ""
-                if (token && token.toLowerCase() !== "none") key = token
-                headerEnded = true
-                continue
-            }
-            if (!/^[A-Za-z]:/.test(cleanLine)) {
-                headerEnded = true
-            }
+            if (!fallbackComposer) fallbackComposer = value
+            continue
+        }
+        if (!key && /^K:/.test(cleanLine)) {
+            const rawKey = cleanLine.slice(2).trim()
+            const tokenMatch = KEY_TOKEN_PATTERN.exec(rawKey)
+            const token = tokenMatch ? tokenMatch[0].replace(/\s+/g, " ").trim() : ""
+            if (token && token.toLowerCase() !== "none") key = token
         }
     }
 
@@ -382,6 +525,9 @@ export function extractAbcTextVerses(abc: string): string[][] {
             if (!text) {
                 flushVerse()
             } else {
+                if (/^\d+[.)\]]/.test(text) && currentVerse.length > 0) {
+                    flushVerse()
+                }
                 currentVerse.push(text)
             }
             continue
@@ -458,13 +604,17 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
 
     if (firstMusicLine >= endLine) return []
 
-    // Build header lines (everything before the first music row, excluding W: lines and single-% comments)
+    // Build header lines (everything before the first music row, keeping at most one M:, L:, K: and excluding W:, single-% comments, and standalone inline-only voice/field rows)
     const headerLines: string[] = []
     const headerDeclaredVoices = new Set<string>()
     const initialVoiceSettings = new Map<string, VoiceHeaderSettings>()
+    const allDeclaredVoices = new Set<string>()
     let seenHeaderKey = false
-    let lastHeaderVoice: string | null = null
+    let seenHeaderMeterSlot = false
+    let seenHeaderLengthSlot = false
+    let initialRunningVoice: string | null = null
     let explicitHeaderLength = ""
+    let initialHeaderKeyText = ""
     let initialHeaderMeter = formatAbcMeter(staffLines[0].staff[0]?.meter)
     let initialHeaderKeyClef = ""
     let initialHeaderKeyOctave = ""
@@ -473,12 +623,12 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
     for (let index = 0; index < firstMusicLine; index++) {
         const line = sourceLines[index]
         const trimmed = line.trim()
-        if (/^%%begintext\b/i.test(trimmed)) {
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
             inTextBlock = true
             headerLines.push(line)
             continue
         }
-        if (/^%%endtext\b/i.test(trimmed)) {
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
             inTextBlock = false
             headerLines.push(line)
             continue
@@ -489,35 +639,93 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
             if (!trimmed && (headerLines.length === 0 || !headerLines[headerLines.length - 1].trim())) continue
         }
 
-        headerLines.push(line)
-        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (inTextBlock || !trimmed || trimmed.startsWith("%")) {
+            headerLines.push(line)
+            continue
+        }
 
         const clean = stripInlineComment(line)
-        if (/^M:/.test(clean) && !seenHeaderKey) {
-            const rawMeter = clean.slice(2).trim()
-            if (rawMeter) initialHeaderMeter = rawMeter.split(/\s+/)[0]
+        if (/^M:/.test(clean)) {
+            if (!seenHeaderKey) {
+                const rawMeter = clean.slice(2).trim()
+                if (rawMeter) initialHeaderMeter = rawMeter.split(/\s+/)[0]
+                if (!seenHeaderMeterSlot) {
+                    headerLines.push(line)
+                    seenHeaderMeterSlot = true
+                }
+            }
             continue
         }
         if (/^L:/.test(clean)) {
             const lengthMatch = /^L:\s*([0-9]+\s*\/\s*[0-9]+)/.exec(clean)
             if (lengthMatch) explicitHeaderLength = lengthMatch[1].replace(/\s+/g, "")
+            if (!seenHeaderKey && !seenHeaderLengthSlot) {
+                headerLines.push(line)
+                seenHeaderLengthSlot = true
+            }
             continue
         }
         if (/^K:/.test(clean)) {
-            seenHeaderKey = true
-            lastHeaderVoice = null
-            const keyParams = parseClefAndOctave(clean.slice(2))
-            if (keyParams.clef) initialHeaderKeyClef = keyParams.clef
-            if (keyParams.octave) initialHeaderKeyOctave = keyParams.octave
+            const keyBody = clean.slice(2)
+            const keySpec = parseKeySpec(keyBody)
+            if (keySpec) initialHeaderKeyText = keySpec
+            const keyParams = parseClefAndOctave(keyBody)
+            if (seenHeaderKey && initialRunningVoice && allDeclaredVoices.size > 0) {
+                mergeVoiceSettings(initialVoiceSettings, initialRunningVoice, keyParams)
+            } else {
+                if (keyParams.clef) initialHeaderKeyClef = keyParams.clef
+                if (keyParams.octave) initialHeaderKeyOctave = keyParams.octave
+            }
+            if (!seenHeaderKey) {
+                seenHeaderKey = true
+                initialRunningVoice = null
+                headerLines.push(line)
+            }
             continue
         }
         const voiceMatch = /^V:\s*([^\s]+)(.*)$/.exec(clean)
         if (voiceMatch) {
             const voiceId = voiceMatch[1]
             headerDeclaredVoices.add(voiceId)
+            allDeclaredVoices.add(voiceId)
             mergeVoiceSettings(initialVoiceSettings, voiceId, parseClefAndOctave(voiceMatch[2]))
-            if (seenHeaderKey) lastHeaderVoice = voiceId
+            if (seenHeaderKey) initialRunningVoice = voiceId
+            headerLines.push(line)
+            continue
         }
+        if (INLINE_FIELD_ONLY_LINE.test(clean)) {
+            const inlineFieldPattern = /\[(V|L|K):([^\]]*)\]/g
+            let inlineMatch: RegExpExecArray | null
+            while ((inlineMatch = inlineFieldPattern.exec(clean)) !== null) {
+                const fieldName = inlineMatch[1]
+                const fieldBody = inlineMatch[2]
+                if (fieldName === "V") {
+                    const vParts = /^\s*([^\s]+)(.*)$/.exec(fieldBody)
+                    if (vParts) {
+                        const voiceId = vParts[1]
+                        initialRunningVoice = voiceId
+                        allDeclaredVoices.add(voiceId)
+                        mergeVoiceSettings(initialVoiceSettings, voiceId, parseClefAndOctave(vParts[2]))
+                    }
+                } else if (fieldName === "L") {
+                    const lenMatch = /^\s*([0-9]+\s*\/\s*[0-9]+)/.exec(fieldBody)
+                    if (lenMatch) explicitHeaderLength = lenMatch[1].replace(/\s+/g, "")
+                } else if (fieldName === "K") {
+                    const keySpec = parseKeySpec(fieldBody)
+                    if (keySpec) initialHeaderKeyText = keySpec
+                    const keyParams = parseClefAndOctave(fieldBody)
+                    if (initialRunningVoice && allDeclaredVoices.size > 0) {
+                        mergeVoiceSettings(initialVoiceSettings, initialRunningVoice, keyParams)
+                    } else {
+                        if (keyParams.clef) initialHeaderKeyClef = keyParams.clef
+                        if (keyParams.octave) initialHeaderKeyOctave = keyParams.octave
+                    }
+                }
+            }
+            continue
+        }
+
+        headerLines.push(line)
     }
 
     while (headerLines.length > 0 && !headerLines[headerLines.length - 1].trim()) {
@@ -537,12 +745,11 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
     const voiceSettingsBeforeRow = new Map<number, Map<string, VoiceHeaderSettings>>()
     const bodyScoreDirectives: { lineIndex: number; text: string }[] = []
 
-    let runningVoice: string | null = lastHeaderVoice
+    let runningVoice: string | null = initialRunningVoice
     let runningLength = initialLengthText
     let runningKeyClef = initialHeaderKeyClef
     let runningKeyOctave = initialHeaderKeyOctave
     const runningVoiceSettings = cloneVoiceSettingsMap(initialVoiceSettings)
-    const allDeclaredVoices = new Set<string>(headerDeclaredVoices)
 
     inTextBlock = false
     for (let index = firstMusicLine; index < endLine; index++) {
@@ -665,11 +872,12 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
         if (attached.length) attachedLyricsByRow.set(rowIndex, attached)
     }
 
-    // Walk all systems to find carried accidentals and ties that must be written into the start of a slice
+    // Walk all systems using the converter's shared measure splitting and accidental tracker
+    const parsedLines = splitTuneIntoMeasures(staffLines, normalized)
+    const accidentalTracker = createTuneAccidentalTracker()
     const injectionsBySystem = new Map<number, Map<number, AccidentalInjection[]>>()
+    const closingBarsBySystem = new Map<number, Map<number, string>>()
     let accKeyAccidentals = getKeyAccidentalMap(staffLines[0].staff[0]?.key)
-    const carriedBarAccidentals: Record<string, Record<string, string>> = {}
-    const carriedTiedAccidentals: Record<string, Record<string, string>> = {}
 
     for (let systemIndex = 0; systemIndex < staffLines.length; systemIndex++) {
         const staffLine = staffLines[systemIndex]
@@ -678,15 +886,14 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
         }
 
         const systemInjections = new Map<number, AccidentalInjection[]>()
+        const systemClosingBars = new Map<number, string>()
         let nextSystemKeyAcc = accKeyAccidentals
 
-        staffLine.staff.forEach((staff, staffIndex) => {
-            ;(staff.voices || []).forEach((voice, voiceIndex) => {
-                const voiceKey = `${staffIndex}.${voiceIndex}`
-                const measures = splitVoiceIntoMeasures(voice, normalized, staffIndex === 0 && voiceIndex === 0)
+        const parsedVoices = parsedLines[systemIndex]
+        parsedVoices.forEach((staffVoices, staffIndex) => {
+            staffVoices.forEach((measures, voiceIndex) => {
                 if (!measures.length) return
-
-                let prevTied = carriedTiedAccidentals[voiceKey] || {}
+                const voiceKey = `${staffIndex}.${voiceIndex}`
                 let voiceKeyAcc = { ...accKeyAccidentals }
 
                 for (let measureIdx = 0; measureIdx < measures.length; measureIdx++) {
@@ -698,18 +905,17 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                         }
                     }
 
-                    const wholeBarAcc: Record<string, string> = measureIdx === 0 && carriedBarAccidentals[voiceKey] ? { ...carriedBarAccidentals[voiceKey] } : {}
+                    const accState = accidentalTracker.beginMeasure(voiceKey, voiceKeyAcc)
                     const sliceBarAcc: Record<string, string> = {}
-                    let needSliceFixup = systemIndex > 0 && measureIdx === 0 && (Object.keys(wholeBarAcc).length > 0 || Object.keys(prevTied).length > 0)
-                    const nextTied: Record<string, string> = {}
+                    let needSliceFixup = systemIndex > 0 && measureIdx === 0 && (accState.hadCarriedBar || accState.hadCarriedTied)
 
                     for (const element of measure.events) {
                         if (element.el_type === "key") {
-                            voiceKeyAcc = getKeyAccidentalMap(element as unknown as KeySignature)
+                            accidentalTracker.applyKeyChange(accState, element as unknown as KeySignature)
+                            voiceKeyAcc = { ...accState.keyAccidentals }
                             if (staffIndex === 0 && voiceIndex === 0) {
                                 nextSystemKeyAcc = voiceKeyAcc
                             }
-                            for (const pitchKey of Object.keys(wholeBarAcc)) delete wholeBarAcc[pitchKey]
                             for (const pitchKey of Object.keys(sliceBarAcc)) delete sliceBarAcc[pitchKey]
                             needSliceFixup = false
                             continue
@@ -720,28 +926,19 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                         const neededByPitch = new Map<number, string>()
 
                         pitches.forEach((pitch, pitchIndex) => {
-                            const step = ((pitch.pitch % 7) + 7) % 7
-                            const octave = 4 + Math.floor(pitch.pitch / 7)
-                            const pitchKey = `${step}.${octave}`
-                            const explicitAcc = pitch.accidental ? ACCIDENTAL_CODES[pitch.accidental] : undefined
-                            if (explicitAcc) wholeBarAcc[pitchKey] = explicitAcc
-
-                            const wholeSounding = explicitAcc || wholeBarAcc[pitchKey] || (pitch.endTie && prevTied[pitchKey]) || voiceKeyAcc[PITCH_NAMES[step]] || "n"
+                            const { step, pitchKey, explicitAccidental, soundingAccidental } = accidentalTracker.resolvePitch(accState, pitch)
                             if (needSliceFixup) {
-                                const sliceSounding = explicitAcc || sliceBarAcc[pitchKey] || voiceKeyAcc[PITCH_NAMES[step]] || "n"
-                                if (explicitAcc) {
-                                    sliceBarAcc[pitchKey] = explicitAcc
-                                } else if (wholeSounding !== sliceSounding) {
-                                    const abcPrefix = MEI_TO_ABC_ACCIDENTAL[wholeSounding]
+                                const sliceSounding = explicitAccidental || sliceBarAcc[pitchKey] || accState.keyAccidentals[PITCH_NAMES[step]] || "n"
+                                if (explicitAccidental) {
+                                    sliceBarAcc[pitchKey] = explicitAccidental
+                                } else if (soundingAccidental !== sliceSounding) {
+                                    const abcPrefix = MEI_TO_ABC_ACCIDENTAL[soundingAccidental]
                                     if (abcPrefix) {
                                         neededByPitch.set(pitchIndex, abcPrefix)
-                                        sliceBarAcc[pitchKey] = wholeSounding
+                                        sliceBarAcc[pitchKey] = soundingAccidental
                                     }
                                 }
                             }
-
-                            if (pitch.startTie) nextTied[pitchKey] = wholeSounding
-                            else delete nextTied[pitchKey]
                         })
 
                         if (neededByPitch.size > 0 && element.startChar !== undefined && element.endChar !== undefined) {
@@ -761,11 +958,18 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                         }
                     }
 
-                    prevTied = nextTied
-                    if (measureIdx === measures.length - 1) {
-                        carriedTiedAccidentals[voiceKey] = nextTied
-                        carriedBarAccidentals[voiceKey] = !measure.barType ? wholeBarAcc : {}
+                    if (measure.closedByNextLine && measure.barType) {
+                        const closingBarToken = BAR_TYPE_TO_ABC[measure.barType]
+                        if (closingBarToken && measure.endChar !== undefined) {
+                            const lastOffset = Math.max(0, measure.endChar - 1)
+                            const lastRow = getLineIndexAt(lineStarts, lastOffset)
+                            if (systemMusicRows[systemIndex].has(lastRow)) {
+                                systemClosingBars.set(lastRow, closingBarToken)
+                            }
+                        }
                     }
+
+                    accidentalTracker.endMeasure(voiceKey, accState, Boolean(measure.barType))
                 }
             })
         })
@@ -774,12 +978,16 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
         if (systemInjections.size > 0) {
             injectionsBySystem.set(systemIndex, systemInjections)
         }
+        if (systemClosingBars.size > 0) {
+            closingBarsBySystem.set(systemIndex, systemClosingBars)
+        }
     }
 
     // Track active key and time signature at the first and last note of each system
     let pendingMeterFromPrevEnd: Meter | undefined = staffLines[0].staff[0]?.meter
     let prevSystemEndMeterText = ""
     let runningKey: KeySignature | undefined = staffLines[0].staff[0]?.key
+    let runningKeyText = initialHeaderKeyText || formatAbcKeySignature(runningKey)
 
     const slices: PreparedAbcSlice[] = []
 
@@ -791,10 +999,12 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
         const baseMeter: Meter | undefined = systemIndex === 0 ? staffLine.staff[0]?.meter : staffLine.staff[0]?.meter || pendingMeterFromPrevEnd
 
         let startKey: KeySignature | undefined = runningKey
+        let startKeyText = runningKeyText
         let startMeter: Meter | undefined = baseMeter
         let endMeter: Meter | undefined = baseMeter
         let trailingMeter: Meter | undefined = baseMeter
         let trailingKey: KeySignature | undefined = runningKey
+        let trailingKeyText = runningKeyText
 
         let foundPrimaryStart = false
         staffLine.staff.forEach((staff, staffIndex) => {
@@ -804,6 +1014,7 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                 let localMeter: Meter | undefined = baseMeter
                 let localEndMeter: Meter | undefined = baseMeter
                 let localKey: KeySignature | undefined = runningKey
+                let localKeyText = runningKeyText
 
                 for (const element of voice as RawAbcElem[]) {
                     if (element.el_type === "meter") {
@@ -813,8 +1024,11 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                         }
                     } else if (element.el_type === "key") {
                         localKey = element as unknown as KeySignature
+                        const extractedKeyText = extractKeyTextFromElement(element, normalized)
+                        if (extractedKeyText) localKeyText = extractedKeyText
                         if (!seenNote && (isPrimary || !foundPrimaryStart)) {
                             startKey = localKey
+                            startKeyText = localKeyText
                         }
                     } else if (element.el_type === "note") {
                         seenNote = true
@@ -827,20 +1041,23 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                     endMeter = localEndMeter
                     trailingMeter = localMeter
                     trailingKey = localKey
+                    trailingKeyText = localKeyText
                 } else if (!foundPrimaryStart) {
                     endMeter = localEndMeter
                     trailingMeter = localMeter
                     trailingKey = localKey
+                    trailingKeyText = localKeyText
                 }
             })
         })
 
-        const systemKeyText = formatAbcKeySignature(startKey)
+        const systemKeyText = startKeyText || formatAbcKeySignature(startKey)
         const systemMeterText = formatAbcMeter(startMeter)
         const endMeterText = formatAbcMeter(endMeter)
 
         pendingMeterFromPrevEnd = trailingMeter
         if (trailingKey) runningKey = trailingKey
+        if (trailingKeyText) runningKeyText = trailingKeyText
 
         if (!sortedRows.length) continue
 
@@ -850,7 +1067,7 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
 
         let headerText = headerLines.join("\n")
         if (systemKeyText) {
-            headerText = updateAbcHeaderField(headerText, "K", systemKeyText)
+            headerText = updateSliceKeyLine(headerText, systemKeyText)
         }
         if (systemMeterText) {
             headerText = updateAbcHeaderField(headerText, "M", systemMeterText)
@@ -898,9 +1115,10 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
         }
 
         const sliceLines = [...sliceHeader]
-        let activeSliceVoice: string | null = lastHeaderVoice
+        let activeSliceVoice: string | null = getLastHeaderVoiceAfterKey(sliceHeader)
         const emittedBodyDecls = new Set<string>()
         const rowInjections = injectionsBySystem.get(systemIndex)
+        const rowClosingBars = closingBarsBySystem.get(systemIndex)
 
         for (const rowIndex of sortedRows) {
             if (!rowStartsWithInlineVoice.has(rowIndex)) {
@@ -930,7 +1148,8 @@ function prepareAbcSystemSlices(abc: string, parseOnly: AbcParseOnly): PreparedA
                 }
             }
 
-            const renderedRow = applyRowInjections(sourceLines[rowIndex], rowInjections?.get(rowIndex))
+            const injectedRow = applyRowInjections(sourceLines[rowIndex], rowInjections?.get(rowIndex))
+            const renderedRow = appendClosingBarToRow(injectedRow, rowClosingBars?.get(rowIndex))
             sliceLines.push(renderedRow)
 
             const endedVoice = rowEndingInlineVoice.get(rowIndex)

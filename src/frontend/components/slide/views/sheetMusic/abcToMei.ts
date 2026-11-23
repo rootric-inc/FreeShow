@@ -1,6 +1,6 @@
 import type { KeySignature, Meter, NotePitch, Staff, TuneObject } from "abcjs"
 import type { AbcPartInfo, AbcProblem, RawAbcElem, VoiceMeasure } from "./abcChecks"
-import { buildOffsetMapper, checkAbcTune, collectHeldLyrics, findSecondTuneLine, getAbcParts, getDeclaredStaffVoices, getExpectedVoiceCounts, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, makeAbcProblem, parseAbcTunes, splitVoiceIntoMeasures, trimCharRange } from "./abcChecks"
+import { buildOffsetMapper, checkAbcTune, collectHeldLyrics, findSecondTuneLine, getAbcParts, getDeclaredStaffVoices, getExpectedVoiceCounts, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, makeAbcProblem, parseAbcTunes, splitTuneIntoMeasures, trimCharRange } from "./abcChecks"
 import type { AbcParseOnly } from "./abcjs"
 import { normalizeLineEndings } from "./abcSource"
 
@@ -26,11 +26,35 @@ export interface ConvertAbcOptions {
     hideInitialMeter?: boolean
 }
 
-interface RawNotePitch extends NotePitch {
+export interface RawNotePitch extends NotePitch {
     startTie?: unknown
     endTie?: unknown
     startSlur?: ({ label?: number } | number)[]
     endSlur?: ({ label?: number } | number)[]
+}
+
+export interface MeasureAccidentalState {
+    barAccidentals: Record<string, string>
+    previousTied: Record<string, string>
+    nextTied: Record<string, string>
+    keyAccidentals: Record<string, string>
+    hadCarriedBar: boolean
+    hadCarriedTied: boolean
+}
+
+export interface ResolvedPitchAccidental {
+    step: number
+    octave: number
+    pitchKey: string
+    explicitAccidental: string | undefined
+    soundingAccidental: string
+}
+
+export interface TuneAccidentalTracker {
+    beginMeasure: (voiceKey: string, keyAccidentals: Record<string, string>) => MeasureAccidentalState
+    applyKeyChange: (state: MeasureAccidentalState, key: KeySignature | undefined) => void
+    resolvePitch: (state: MeasureAccidentalState, pitch: RawNotePitch) => ResolvedPitchAccidental
+    endMeasure: (voiceKey: string, state: MeasureAccidentalState, barClosed: boolean) => void
 }
 
 interface MeiDuration {
@@ -48,8 +72,8 @@ interface RenderedNote {
     attributes: string
 }
 
-const PITCH_NAMES = "cdefgab"
-const ACCIDENTAL_CODES: Record<string, string> = { sharp: "s", flat: "f", natural: "n", dblsharp: "x", dblflat: "ff" }
+export const PITCH_NAMES = "cdefgab"
+export const ACCIDENTAL_CODES: Record<string, string> = { sharp: "s", flat: "f", natural: "n", dblsharp: "x", dblflat: "ff" }
 const RIGHT_BAR_TYPES: Record<string, string> = { bar_thin_thin: "dbl", bar_thin_thick: "end", bar_right_repeat: "rptend", bar_dbl_repeat: "rptboth", bar_invisible: "invis" }
 const CLEF_ATTRIBUTES: Record<string, string> = { bass: `F" clef.line="4`, alto: `C" clef.line="3`, tenor: `C" clef.line="4`, perc: `perc" clef.line="3` }
 const IGNORED_ELEMENT_TYPES = new Set(["stem", "style", "tempo", "part", "scale", "midi", "transpose", "break"])
@@ -98,7 +122,7 @@ function formatKeySignature(key: KeySignature | undefined): string {
     return accidentals.length ? `${accidentals.length}${accidentals[0].acc === "flat" ? "f" : "s"}` : "0"
 }
 
-function getKeyAccidentalMap(key: KeySignature | undefined): Record<string, string> {
+export function getKeyAccidentalMap(key: KeySignature | undefined): Record<string, string> {
     const map: Record<string, string> = {}
     if (key && key.accidentals) {
         for (const item of key.accidentals) {
@@ -106,6 +130,46 @@ function getKeyAccidentalMap(key: KeySignature | undefined): Record<string, stri
         }
     }
     return map
+}
+
+export function createTuneAccidentalTracker(): TuneAccidentalTracker {
+    const carriedBarAccidentals: Record<string, Record<string, string>> = {}
+    const carriedTiedAccidentals: Record<string, Record<string, string>> = {}
+
+    return {
+        beginMeasure(voiceKey: string, keyAccidentals: Record<string, string>): MeasureAccidentalState {
+            const carriedBar = carriedBarAccidentals[voiceKey]
+            const previousTied = carriedTiedAccidentals[voiceKey] || {}
+            return {
+                barAccidentals: carriedBar ? { ...carriedBar } : {},
+                previousTied,
+                nextTied: {},
+                keyAccidentals: { ...keyAccidentals },
+                hadCarriedBar: Boolean(carriedBar && Object.keys(carriedBar).length > 0),
+                hadCarriedTied: Object.keys(previousTied).length > 0
+            }
+        },
+        applyKeyChange(state: MeasureAccidentalState, key: KeySignature | undefined): void {
+            state.keyAccidentals = getKeyAccidentalMap(key)
+            for (const pitchKey of Object.keys(state.barAccidentals)) delete state.barAccidentals[pitchKey]
+        },
+        resolvePitch(state: MeasureAccidentalState, pitch: RawNotePitch): ResolvedPitchAccidental {
+            // abcjs already shifts pitch.pitch by any voice octave= setting
+            const step = ((pitch.pitch % 7) + 7) % 7
+            const octave = 4 + Math.floor(pitch.pitch / 7)
+            const pitchKey = `${step}.${octave}`
+            const explicitAccidental = pitch.accidental ? ACCIDENTAL_CODES[pitch.accidental] : undefined
+            if (explicitAccidental) state.barAccidentals[pitchKey] = explicitAccidental
+            const soundingAccidental = explicitAccidental || state.barAccidentals[pitchKey] || (pitch.endTie && state.previousTied[pitchKey]) || state.keyAccidentals[PITCH_NAMES[step]] || "n"
+            if (pitch.startTie) state.nextTied[pitchKey] = soundingAccidental
+            else delete state.nextTied[pitchKey]
+            return { step, octave, pitchKey, explicitAccidental, soundingAccidental }
+        },
+        endMeasure(voiceKey: string, state: MeasureAccidentalState, barClosed: boolean): void {
+            carriedTiedAccidentals[voiceKey] = state.nextTied
+            carriedBarAccidentals[voiceKey] = barClosed ? {} : state.barAccidentals
+        }
+    }
 }
 
 function formatMeterAttrs(meter: Meter | undefined): string {
@@ -178,8 +242,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
     const inWordByVerse: Record<string, boolean> = {}
     const openSlurs: Record<string, OpenSlur> = {}
     const measureControls: Record<number, string[]> = {}
-    const tiedAccidentals: Record<string, Record<string, string>> = {}
-    const carriedBarAccidentals: Record<string, Record<string, string>> = {}
+    const accidentalTracker = createTuneAccidentalTracker()
     const carriedDisplayedAccidentals: Record<string, Record<string, string>> = {}
     const usedIds = new Set<string>()
     const noteRanges: AbcNoteRange[] = []
@@ -261,26 +324,23 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
         }
     }
 
+    const parsedLines = splitTuneIntoMeasures(
+        lines,
+        normalized,
+        (element) => {
+            if (element.startEnding) pushWarning("repeat_ending", [], element)
+            if (element.gracenotes && element.gracenotes.length) pushWarning("grace_notes", [], element)
+            warnChordOrAnnotation(element)
+            recordDroppedDecorations(element)
+        },
+        (element) => {
+            if (!IGNORED_ELEMENT_TYPES.has(element.el_type)) pushWarning("unsupported_element", [String(element.el_type || "unknown")], element)
+        },
+        true
+    )
+
     lines.forEach((line, lineIndex) => {
-        const parsedVoices = line.staff.map((staff, staffIndex) =>
-            (staff.voices || []).map((voice, voiceIndex) =>
-                splitVoiceIntoMeasures(
-                    voice,
-                    normalized,
-                    staffIndex === 0 && voiceIndex === 0,
-                    (element) => {
-                        if (element.startEnding) pushWarning("repeat_ending", [], element)
-                        if (element.gracenotes && element.gracenotes.length) pushWarning("grace_notes", [], element)
-                        warnChordOrAnnotation(element)
-                        recordDroppedDecorations(element)
-                    },
-                    (element) => {
-                        if (!IGNORED_ELEMENT_TYPES.has(element.el_type)) pushWarning("unsupported_element", [String(element.el_type || "unknown")], element)
-                    },
-                    voiceIndex === 0
-                )
-            )
-        )
+        const parsedVoices = parsedLines[lineIndex]
         const measureCount = Math.max(0, ...parsedVoices.flat().map((measures) => measures.length))
         if (!measureCount) return
 
@@ -378,12 +438,9 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
                 emittedVoiceIndices.forEach((voiceIndex, emittedIndex) => {
                     const measures = staffVoices[voiceIndex]
                     const voiceKey = `${staffIndex}.${voiceIndex}`
-                    const abcBarAccidentals: Record<string, string> = carriedBarAccidentals[voiceKey] ? { ...carriedBarAccidentals[voiceKey] } : {}
+                    const accState = accidentalTracker.beginMeasure(voiceKey, measureKeyAccidentals)
                     const displayedBarAccidentals: Record<string, string> = carriedDisplayedAccidentals[voiceKey] ? { ...carriedDisplayedAccidentals[voiceKey] } : {}
-                    let voiceKeyAccidentals: Record<string, string> = { ...measureKeyAccidentals }
                     let midBarKeyChanged = false
-                    const previousTied = tiedAccidentals[voiceKey] || {}
-                    const nextTied: Record<string, string> = {}
                     const stemAttr = emittedVoiceIndices.length >= 2 ? ` stem.dir="${emittedIndex ? "down" : "up"}"` : ""
                     measureXml.push(`<layer n="${emittedIndex + 1}">`)
                     if (emittedIndex === 0 && newClef) {
@@ -414,8 +471,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
                     const currentMeasure = measures[measureOffset]
                     for (const element of currentMeasure ? currentMeasure.events : []) {
                         if (element.el_type === "key") {
-                            voiceKeyAccidentals = getKeyAccidentalMap(element as unknown as KeySignature)
-                            for (const pitchKey of Object.keys(abcBarAccidentals)) delete abcBarAccidentals[pitchKey]
+                            accidentalTracker.applyKeyChange(accState, element as unknown as KeySignature)
                             midBarKeyChanged = true
                             if (staffIndex === 0 && voiceIndex === 0) {
                                 pendingKey = element as unknown as KeySignature
@@ -494,23 +550,15 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
                             const pitches = (element.pitches || []) as RawNotePitch[]
                             if (!pitches.length) continue
                             const renderedNotes: RenderedNote[] = pitches.map((pitch, pitchIndex) => {
-                                // abcjs already shifts pitch.pitch by any voice octave= setting
-                                const step = ((pitch.pitch % 7) + 7) % 7
-                                const octave = 4 + Math.floor(pitch.pitch / 7)
+                                const { step, octave, pitchKey, explicitAccidental, soundingAccidental } = accidentalTracker.resolvePitch(accState, pitch)
                                 const noteId = pitches.length > 1 ? `${elementId}-${pitchIndex}` : elementId
-                                const pitchKey = `${step}.${octave}`
                                 const tieAttr = pitch.startTie && pitch.endTie ? ` tie="m"` : pitch.startTie ? ` tie="i"` : pitch.endTie ? ` tie="t"` : ""
-                                const explicitAccidental = pitch.accidental && ACCIDENTAL_CODES[pitch.accidental]
-                                if (explicitAccidental) abcBarAccidentals[pitchKey] = explicitAccidental
-                                const soundingAccidental = explicitAccidental || abcBarAccidentals[pitchKey] || (pitch.endTie && previousTied[pitchKey]) || voiceKeyAccidentals[PITCH_NAMES[step]] || "n"
                                 let writtenAccidental = explicitAccidental
                                 if (!writtenAccidental && midBarKeyChanged && !pitch.endTie) {
                                     const displayedAccidental = displayedBarAccidentals[pitchKey] || measureKeyAccidentals[PITCH_NAMES[step]] || "n"
                                     if (soundingAccidental !== displayedAccidental) writtenAccidental = soundingAccidental
                                 }
                                 if (writtenAccidental) displayedBarAccidentals[pitchKey] = writtenAccidental
-                                if (pitch.startTie) nextTied[pitchKey] = soundingAccidental
-                                else delete nextTied[pitchKey]
                                 const accidentalAttr = (writtenAccidental ? ` accid="${writtenAccidental}"` : "") + (!writtenAccidental && soundingAccidental !== "n" ? ` accid.ges="${soundingAccidental}"` : "")
                                 handleSlurs(pitch.startSlur, true, staffIndex, voiceIndex, noteId, bufferIndex)
                                 handleSlurs(pitch.endSlur, false, staffIndex, voiceIndex, noteId, bufferIndex)
@@ -533,9 +581,9 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
                     }
 
                     while (openTags.length) measureXml.push(`</${openTags.pop()!}>`)
-                    tiedAccidentals[voiceKey] = nextTied
-                    carriedBarAccidentals[voiceKey] = currentMeasure && !currentMeasure.barType ? abcBarAccidentals : {}
-                    carriedDisplayedAccidentals[voiceKey] = currentMeasure && !currentMeasure.barType ? displayedBarAccidentals : {}
+                    const barClosed = !currentMeasure || Boolean(currentMeasure.barType)
+                    accidentalTracker.endMeasure(voiceKey, accState, barClosed)
+                    carriedDisplayedAccidentals[voiceKey] = barClosed ? {} : displayedBarAccidentals
                     measureXml.push("</layer>")
                 })
                 measureXml.push("</staff>")

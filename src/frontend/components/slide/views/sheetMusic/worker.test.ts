@@ -99,11 +99,13 @@ function getFilteredLogLines(rawLog: string): string[] {
 describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-music/verovio-module.mjs from preBuild)", () => {
     let handleMessage: (message: Record<string, unknown>) => Promise<any>
     let getLastRenderLog: () => string
+    let getLastRenderLayouts: () => number
 
     beforeAll(async () => {
         const mod = await import(/* @vite-ignore */ workerModuleHref)
         handleMessage = mod.handleMessage
         getLastRenderLog = mod.getLastRenderLog
+        getLastRenderLayouts = mod.getLastRenderLayouts
     })
 
     it("loads MusicXML into normalized MEI without meiHead and with bar.thru set to false", async () => {
@@ -514,5 +516,34 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         const twoRowStats = getLastSystemBarlineRight(twoRows.svg)
         expect(twoRowStats.systemCount).toBe(2)
         expect(twoRowStats.maxX).toBeLessThan(twoRowStats.usableRight * 0.75)
+        expect(getLastRenderLayouts()).toBe(2)
+
+        // Fitted one-row drawing fills full width in 1 layout
+        const fittedOneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840, ratio: 0.4 })
+        const fittedOneRowStats = getLastSystemBarlineRight(fittedOneRow.svg)
+        expect(fittedOneRowStats.systemCount).toBe(1)
+        expect(fittedOneRowStats.maxX).toBeGreaterThan(fittedOneRowStats.usableRight * 0.95)
+        expect(getLastRenderLayouts()).toBe(1)
+
+        // Fitted multi-row drawing runs the second justification pass once on the chosen layout, not at every search step
+        const multiRowMei = makeMei(13)
+        const fittedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
+        const fittedMultiLayouts = getLastRenderLayouts()
+        const fittedMultiStats = getLastSystemBarlineRight(fittedMulti.svg)
+        expect(fittedMulti.fits).toBe(true)
+        expect(fittedMultiStats.systemCount).toBeGreaterThan(1)
+        expect(fittedMultiStats.maxX).toBeLessThan(fittedMultiStats.usableRight * 0.75)
+        expect(fittedMultiLayouts).toBeLessThanOrEqual(9)
+
+        // Repeating the same fit request or a narrower preferred width reuses the finalized canonical drawing identically
+        const repeatedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
+        expect(repeatedMulti.pageWidth).toBe(fittedMulti.pageWidth)
+        expect(repeatedMulti.svg).toBe(fittedMulti.svg)
+        expect(getLastRenderLayouts()).toBe(1)
+
+        const narrowerMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 900, ratio: 0.4 })
+        expect(narrowerMulti.pageWidth).toBe(fittedMulti.pageWidth)
+        expect(narrowerMulti.svg).toBe(fittedMulti.svg)
+        expect(getLastRenderLayouts()).toBe(1)
     })
 })

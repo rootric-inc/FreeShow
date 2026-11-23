@@ -133,14 +133,45 @@ describe("ABC metadata and W: verse extraction", () => {
             composer: "William H. Monk",
             key: "C"
         })
+
+        // Same-line Words + Music and Setting, separate Music and Setting, Text, Tune, and pre-X: blocks/stray text
+        const sameLineMusicAndSetting = ["X: 1", "T: It Is Well", "C: Words: Horatio G. Spafford, 1873.  Music and Setting: 'It Is Well' Philip P. Bliss, 1876.", "C: copyright: public domain.", "K: Db", "D4 |"].join("\n")
+        expect(extractAbcMetadata(sameLineMusicAndSetting)).toEqual({
+            title: "It Is Well",
+            author: "Horatio G. Spafford, 1873.",
+            composer: "'It Is Well' Philip P. Bliss, 1876.",
+            copyright: "public domain.",
+            key: "Db"
+        })
+
+        const separateMusicAndSetting = ["%%beginps", "/opnot { 0 0 moveto } def", "%%endps", "X: 1", "T: In The Bleak MidWinter", "C: Words: Christina Georgina Rossetti, 1872, alt.", "C: Music and Setting: 'Cranham' Gustav Theodore Holst, 1906, alt.", "C: copyright: public domain.", "K: F", "F4 |"].join("\n")
+        expect(extractAbcMetadata(separateMusicAndSetting)).toEqual({
+            title: "In The Bleak MidWinter",
+            author: "Christina Georgina Rossetti, 1872, alt.",
+            composer: "'Cranham' Gustav Theodore Holst, 1906, alt.",
+            copyright: "public domain.",
+            key: "F"
+        })
+
+        const textAndTuneLabels = ["l%%%%", "X: 1", "T: Kingsfold", "C: Text: Anthony Robertson, 2010.  Tune: 'Kingsfold' traditional English.  Setting: Ralph Vaughan Williams, 1906.", "C: copyright: music and setting public domain. Words: Copyright 2010.", "K: G", "G4 |"].join("\n")
+        expect(extractAbcMetadata(textAndTuneLabels)).toEqual({
+            title: "Kingsfold",
+            author: "Anthony Robertson, 2010.",
+            composer: "'Kingsfold' traditional English.",
+            copyright: "music and setting public domain. Words: Copyright 2010.",
+            key: "G"
+        })
     })
 
-    it("extracts plain-text verses separated by empty W: lines", () => {
+    it("extracts plain-text verses separated by empty W: lines or leading verse numbers", () => {
         expect(extractAbcTextVerses(ABIDE_WITH_ME_EXTENDED_ABC)).toEqual([
             ["4. I need Thy presence every passing hour.", "What but Thy grace can foil the tempter's power?"],
             ["5. Hold Thou Thy cross before my closing eyes;", "Shine through the gloom and point me to the skies."]
         ])
         expect(extractAbcTextVerses(ABIDE_WITH_ME_ABC)).toEqual([])
+
+        const numberedWithoutBlank = ["K: C", "C4 |", "W: 2. Line a", "W: Line b", "W: 3. Line c", "W: 4) Line d", "W: Line e"].join("\n")
+        expect(extractAbcTextVerses(numberedWithoutBlank)).toEqual([["2. Line a", "Line b"], ["3. Line c"], ["4) Line d", "Line e"]])
     })
 })
 
@@ -214,25 +245,40 @@ describe("ABC cutting into system slices (with real abcjs)", () => {
     })
 
     it("writes carried accidentals and tied accidentals into the next slice and drops incoming ties (A2)", () => {
+        const checkCarriedSlice = (abc: string) => {
+            const whole = convertAndCheckAbc(abc, abcjs.parseOnly)
+            expect(whole.hasError).toBe(false)
+            const slices = sliceAbcIntoSystems(abc, abcjs.parseOnly)
+            expect(slices).toHaveLength(2)
+            for (const slice of slices) expect(slice.analysis.hasError).toBe(false)
+            const issues = compareMeiSlicesToWhole(
+                whole.mei,
+                slices.map((slice) => slice.analysis.mei)
+            )
+            // The slice intentionally draws the restated accidental at the start of slide 2 while the whole score implies it
+            expect(issues.length).toBeGreaterThan(0)
+            expect(issues.every((issue) => issue.kind === "notes" && issue.sliceIndex === 1 && issue.measureNumber === 2)).toBe(true)
+            return slices
+        }
+
         const unfinishedBar = ["M:4/4", "L:1/4", "K:F", "C F ^G", "G | B4 |"].join("\n")
-        const barSlices = assertSlicesMatchWhole(unfinishedBar).slices
-        expect(barSlices).toHaveLength(2)
+        const barSlices = checkCarriedSlice(unfinishedBar)
         expect(barSlices[1].abc).toContain("^G | B4 |")
+        expect(barSlices[1].analysis.mei).toContain('pname="g" oct="4" accid="s"')
 
         const multiVoiceUnfinishedBar = ["M: 3/4", "L: 1/4", "K: F", "%%staves (S1V1 S1V2) | (S2V1 S2V2)", "V: S1V1 clef=treble", "V: S1V2", "V: S2V1 clef=bass", "V: S2V2", "[V: S1V1] F E3/2", "[V: S1V2] C =B,3/2", "[V: S2V1] A, _A,3/2", "[V: S2V2] F, F,3/2", "[V: S1V1] D/ | G3 |", "[V: S1V2] B,/ | C3 |", "[V: S2V1] A,/ | G,3 |", "[V: S2V2] F,/ | E,3 |"].join("\n")
-        const mvSlices = assertSlicesMatchWhole(multiVoiceUnfinishedBar).slices
-        expect(mvSlices).toHaveLength(2)
+        const mvSlices = checkCarriedSlice(multiVoiceUnfinishedBar)
         expect(mvSlices[1].abc).toContain("=B,/ | C3 |")
         expect(mvSlices[1].abc).toContain("_A,/ | G,3 |")
 
         const tiedAccidental = ["M:4/4", "L:1/4", "K:C", "^F4-|", "F4|"].join("\n")
-        const tieSlices = assertSlicesMatchWhole(tiedAccidental).slices
-        expect(tieSlices).toHaveLength(2)
+        const tieSlices = checkCarriedSlice(tiedAccidental)
         expect(tieSlices[1].abc).toContain("^F4|")
+        expect(tieSlices[1].analysis.mei).toContain('pname="f" oct="4" accid="s"')
         expect(tieSlices[1].analysis.mei).not.toContain('tie="t"')
 
         const tiedThenSecondNote = ["M:4/4", "L:1/4", "K:C", "^F4-|", "F2 F2 |"].join("\n")
-        const tieTwoSlices = assertSlicesMatchWhole(tiedThenSecondNote).slices
+        const tieTwoSlices = checkCarriedSlice(tiedThenSecondNote)
         expect(tieTwoSlices[1].abc).toContain("^F2 =F2 |")
     })
 
@@ -312,5 +358,89 @@ describe("ABC cutting into system slices (with real abcjs)", () => {
 
         expect(hidden.mei).toContain('meter.count="4" meter.unit="4" meter.visible="false"')
         expect(hasHiddenInitialMeter(hidden.mei)).toBe(true)
+    })
+
+    it("keeps K:, M: and L: exactly once before the first music row even when fields appear after K:", () => {
+        const lengthAfterKey = ["M:4/4", "K:C", "L:1/4", "C D E F |", "L:1/8", "G2 A2 B2 c2 |"].join("\n")
+        const lengthSlices = assertSlicesMatchWhole(lengthAfterKey).slices
+        expect(lengthSlices).toHaveLength(2)
+        expect(lengthSlices[1].abc.match(/^L:/gm)).toHaveLength(1)
+        expect(lengthSlices[1].abc.match(/^M:/gm)).toHaveLength(1)
+        expect(lengthSlices[1].abc.match(/^K:/gm)).toHaveLength(1)
+        expect(lengthSlices[1].abc).toContain("L: 1/8")
+        expect(lengthSlices[1].abc).not.toContain("L:1/4")
+
+        const meterAndKeyAfterKey = ["M:4/4", "K:C", "M:3/4", "K:G", "L:1/4", "G A B |", "c B A |"].join("\n")
+        const mkSlices = assertSlicesMatchWhole(meterAndKeyAfterKey).slices
+        expect(mkSlices).toHaveLength(2)
+        for (const slice of mkSlices) {
+            expect(slice.abc.match(/^K:/gm)).toHaveLength(1)
+            expect(slice.abc.match(/^M:/gm)).toHaveLength(1)
+            expect(slice.abc.match(/^L:/gm)).toHaveLength(1)
+            expect(slice.abc).toContain("K:G")
+            expect(slice.abc).toContain("M:3/4")
+        }
+    })
+
+    it("preserves extra key accidentals and clears earlier ones when the key changes", () => {
+        const inlineExp = ["M:4/4", "L:1/4", "K:C", "F2 B2 |", "[K:D exp _b] B2 F2 |", "F2 B2 |"].join("\n")
+        const inlineExpSlices = assertSlicesMatchWhole(inlineExp).slices
+        expect(inlineExpSlices).toHaveLength(3)
+        expect(inlineExpSlices[2].abc).toContain("K:D exp _b")
+        expect(inlineExpSlices[2].analysis.mei).toContain('pname="b" oct="4" accid.ges="f"')
+
+        const headerExpThenG = ["M:4/4", "L:1/4", "K:D exp _b", "B2 F2 |", "[K:G] F2 B2 |"].join("\n")
+        const headerExpSlices = assertSlicesMatchWhole(headerExpThenG).slices
+        expect(headerExpSlices).toHaveLength(2)
+        expect(headerExpSlices[1].abc).toContain("K:G")
+        expect(headerExpSlices[1].abc).not.toContain("exp _b")
+        expect(headerExpSlices[1].analysis.mei).toContain('pname="b" oct="4">')
+
+        const bodyExtraAcc = ["M:4/4", "L:1/4", "K:Eb", "B2 F2 |", "K:C ^f", "F2 B2 |"].join("\n")
+        const bodyExtraSlices = assertSlicesMatchWhole(bodyExtraAcc).slices
+        expect(bodyExtraSlices).toHaveLength(2)
+        expect(bodyExtraSlices[1].abc).toContain("K:C ^f")
+        expect(bodyExtraSlices[1].analysis.mei).toContain('pname="f" oct="4" accid.ges="s"')
+    })
+
+    it("ends an open bar when the next row starts with a bar line and leaves the next note fresh", () => {
+        const leadingBar = ["M:4/4", "L:1/4", "K:C", "C D E ^F", "| F G A B |"].join("\n")
+        const { whole, slices } = assertSlicesMatchWhole(leadingBar)
+        expect(whole.problems).toEqual([])
+        expect(slices).toHaveLength(2)
+        expect(whole.mei.match(/<measure\b/g)).toHaveLength(2)
+        expect(whole.mei).not.toContain('right="invis"')
+        expect(slices[1].abc).toContain("| F G A B |")
+        expect(slices[1].abc).not.toContain("^F")
+        const slice2Notes = slices[1].analysis.mei.match(/<note\b[^>]*>/g) || []
+        expect(slice2Notes[0]).not.toContain("accid")
+    })
+
+    it("tracks a standalone [V:...] voice switch line before or between music rows", () => {
+        const standaloneVoice = ["%%score S A", "V:S", "V:A", "[V:S]", "C D E F |", "[V:A]", "C D E F |", "[V:S]", "G A B c |", "[V:A]", "G A B c |"].join("\n")
+        const { slices } = assertSlicesMatchWhole(standaloneVoice)
+        expect(slices).toHaveLength(2)
+        expect(slices[0].abc).toContain("V: S")
+        expect(slices[0].abc).toContain("V: A")
+        expect(slices[1].abc).toContain("V: S")
+        expect(slices[1].abc).toContain("V: A")
+
+        const withKey = ["M:4/4", "L:1/4", "K:C", standaloneVoice].join("\n")
+        const withKeySlices = assertSlicesMatchWhole(withKey).slices
+        expect(withKeySlices).toHaveLength(2)
+    })
+
+    it("detects drawn vs implied accidental differences and bar line differences in compareMeiSlicesToWhole", () => {
+        const makeScore = (measureAttrs: string, noteAttrs: string) => `<mei><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section><measure n="1"${measureAttrs}><staff n="1"><layer n="1"><note dur="1" ${noteAttrs}/></layer></staff></measure></section></score></mdiv></body></music></mei>`
+
+        const impliedSharp = makeScore("", 'pname="f" oct="4" accid.ges="s"')
+        const drawnSharp = makeScore("", 'pname="f" oct="4" accid="s"')
+        const naturalNote = makeScore("", 'pname="f" oct="4"')
+        const invisBar = makeScore(' right="invis"', 'pname="f" oct="4"')
+
+        expect(compareMeiSlicesToWhole(impliedSharp, [impliedSharp])).toEqual([])
+        expect(compareMeiSlicesToWhole(impliedSharp, [drawnSharp]).map((i) => i.kind)).toEqual(["notes"])
+        expect(compareMeiSlicesToWhole(drawnSharp, [naturalNote]).map((i) => i.kind)).toEqual(["notes"])
+        expect(compareMeiSlicesToWhole(naturalNote, [invisBar]).map((i) => i.kind)).toEqual(["barline"])
     })
 })
