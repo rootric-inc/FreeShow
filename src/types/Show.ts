@@ -148,6 +148,10 @@ export interface Item {
         abc?: string // the ABC text as typed or pasted, kept so the popup can edit it again. Missing on items made from a music file
         label?: string
         size?: number
+        parts?: "all" | "upper" | "lower" | "melody" | "custom" // which voice parts are drawn. Missing means all
+        customParts?: string[] // "staff.layer" keys such as "1.2", used only with "custom"
+        verses?: string // which verses are drawn. Missing means all, "none" means no words, otherwise verse numbers separated by commas ("2" or "1,3")
+        measures?: string // the measures of the opened file this item holds, such as "5-8". A label only
     }
     tracker?: any // slide progress tracker item data
     bindings?: string[] // bind item to stage or an output

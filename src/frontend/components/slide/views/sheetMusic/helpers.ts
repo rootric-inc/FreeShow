@@ -32,10 +32,62 @@ export function getSheetMusicLabel(sheetMusic: unknown): string {
     return typeof label === "string" ? label : ""
 }
 
+export type SheetMusicPartsPreset = "all" | "upper" | "lower" | "melody" | "custom"
+
+const SHEET_MUSIC_PARTS_PRESETS = new Set<string>(["all", "upper", "lower", "melody", "custom"])
+
 export function getSheetMusicSize(sheetMusic: unknown): number | undefined {
     if (!sheetMusic || typeof sheetMusic !== "object") return undefined
     const size = (sheetMusic as { size?: unknown }).size
     return typeof size === "number" && Number.isFinite(size) ? size : undefined
+}
+
+export function getSheetMusicParts(sheetMusic: unknown): SheetMusicPartsPreset | undefined {
+    if (!sheetMusic || typeof sheetMusic !== "object") return undefined
+    const parts = (sheetMusic as { parts?: unknown }).parts
+    return typeof parts === "string" && SHEET_MUSIC_PARTS_PRESETS.has(parts) ? (parts as SheetMusicPartsPreset) : undefined
+}
+
+export function getSheetMusicCustomParts(sheetMusic: unknown): string[] | undefined {
+    if (!sheetMusic || typeof sheetMusic !== "object") return undefined
+    const customParts = (sheetMusic as { customParts?: unknown }).customParts
+    if (!Array.isArray(customParts)) return undefined
+    return customParts.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+}
+
+export function getSheetMusicVerses(sheetMusic: unknown): string {
+    if (!sheetMusic || typeof sheetMusic !== "object") return ""
+    const verses = (sheetMusic as { verses?: unknown }).verses
+    return typeof verses === "string" ? verses : ""
+}
+
+export function getSheetMusicMeasures(sheetMusic: unknown): string {
+    if (!sheetMusic || typeof sheetMusic !== "object") return ""
+    const measures = (sheetMusic as { measures?: unknown }).measures
+    return typeof measures === "string" ? measures : ""
+}
+
+export const SHEET_MUSIC_POPUP_OWNED_FIELDS = ["data", "abc", "label", "measures"] as const
+
+export function mergeSheetMusicOwnedFields(existing: unknown, incoming: unknown): Record<string, any> {
+    const next: Record<string, any> = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, any>) } : {}
+    if (Array.isArray(next.customParts)) next.customParts = [...next.customParts]
+
+    const source: Record<string, any> = incoming && typeof incoming === "object" && !Array.isArray(incoming) ? (incoming as Record<string, any>) : {}
+    for (const key of SHEET_MUSIC_POPUP_OWNED_FIELDS) {
+        const value = source[key]
+        if (typeof value === "string" && value.length > 0) next[key] = value
+        else delete next[key]
+    }
+
+    return next
+}
+
+export function getSheetMusicDisplayLabel(sheetMusic: unknown): string {
+    const label = getSheetMusicLabel(sheetMusic)
+    const measures = getSheetMusicMeasures(sheetMusic).trim()
+    if (!label) return ""
+    return measures ? `${label} (${measures})` : label
 }
 
 export function escapeHtml(text: string): string {
@@ -75,9 +127,10 @@ export function getPageWidthFromStyle(style: string | null | undefined, size: un
     return calculatePageWidth(parseItemWidth(style), size)
 }
 
-export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number): string {
+export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false): string {
     const ratioPart = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? String(ratio) : ""
-    return `${pageWidth}:${ratioPart}:${mei}`
+    const measureNumbersPart = showMeasureNumbers ? "mnum" : ""
+    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${mei}`
 }
 
 export function prefixSvgIds(svg: string, prefix: string): string {

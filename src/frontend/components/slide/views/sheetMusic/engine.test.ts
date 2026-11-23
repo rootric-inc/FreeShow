@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicData, getSheetMusicLabel, getSheetMusicSize, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
+import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, mergeSheetMusicOwnedFields, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
 
 describe("sheetMusic page width and ratio math", () => {
     it("calculates page width for sizes 50, 100 and 200", () => {
@@ -47,19 +47,25 @@ describe("sheetMusic page width and ratio math", () => {
 })
 
 describe("createRenderCacheKey", () => {
-    it("distinguishes different MEI documents, page widths and ratios", () => {
+    it("distinguishes different MEI documents, page widths, ratios and measure-number flags", () => {
         const keyA = createRenderCacheKey("<mei>A</mei>", 1840)
         const keyB = createRenderCacheKey("<mei>B</mei>", 1840)
         const keyC = createRenderCacheKey("<mei>A</mei>", 2300)
         const keyRatio1 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31)
         const keyRatio2 = createRenderCacheKey("<mei>A</mei>", 1840, 0.56)
+        const keyNumbers = createRenderCacheKey("<mei>A</mei>", 1840, undefined, true)
+        const keyRatioNumbers = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, true)
 
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840))
+        expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false))
         expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31))
+        expect(keyNumbers).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, true))
         expect(keyA).not.toBe(keyB)
         expect(keyA).not.toBe(keyC)
         expect(keyA).not.toBe(keyRatio1)
+        expect(keyA).not.toBe(keyNumbers)
         expect(keyRatio1).not.toBe(keyRatio2)
+        expect(keyRatio1).not.toBe(keyRatioNumbers)
     })
 })
 
@@ -162,5 +168,42 @@ describe("escapeHtml and safe sheet_music field readers", () => {
         expect(getSheetMusicSize({ size: "120" })).toBeUndefined()
         expect(getSheetMusicSize({ size: Number.NaN })).toBeUndefined()
         expect(getSheetMusicSize({ size: 125 })).toBe(125)
+        expect(getSheetMusicParts({ parts: "upper" })).toBe("upper")
+        expect(getSheetMusicParts({ parts: "invalid" })).toBeUndefined()
+        expect(getSheetMusicParts({ parts: 42 })).toBeUndefined()
+        expect(getSheetMusicCustomParts({ customParts: ["1.1", "2.1"] })).toEqual(["1.1", "2.1"])
+        expect(getSheetMusicCustomParts({ customParts: ["1.1", 42, ""] })).toEqual(["1.1"])
+        expect(getSheetMusicCustomParts({ customParts: "1.1" })).toBeUndefined()
+        expect(getSheetMusicVerses({ verses: "1,3" })).toBe("1,3")
+        expect(getSheetMusicVerses({ verses: 2 })).toBe("")
+        expect(getSheetMusicMeasures({ measures: "5-8" })).toBe("5-8")
+        expect(getSheetMusicMeasures({ measures: 5 })).toBe("")
+        expect(getSheetMusicDisplayLabel({ label: "Joy to the World", measures: "5-8" })).toBe("Joy to the World (5-8)")
+        expect(getSheetMusicDisplayLabel({ label: "Joy to the World" })).toBe("Joy to the World")
+        expect(getSheetMusicDisplayLabel({ measures: "5-8" })).toBe("")
+    })
+})
+
+describe("mergeSheetMusicOwnedFields", () => {
+    it("updates only popup-owned fields on each selected item while preserving per-item choices", () => {
+        const congregation = { data: "<mei>old</mei>", label: "Old", parts: "upper", verses: "1", size: 120 }
+        const musicians = { data: "<mei>old</mei>", label: "Old", parts: "custom", customParts: ["1.1", "2.1"], size: 90, measures: "1-4" }
+        const popupPayload = { data: "<mei>new</mei>", label: "Amazing Grace", parts: "upper", verses: "1", size: 120 }
+
+        const nextCongregation = mergeSheetMusicOwnedFields(congregation, popupPayload)
+        const nextMusicians = mergeSheetMusicOwnedFields(musicians, popupPayload)
+
+        expect(nextCongregation).toEqual({ data: "<mei>new</mei>", label: "Amazing Grace", parts: "upper", verses: "1", size: 120 })
+        expect(nextMusicians).toEqual({ data: "<mei>new</mei>", label: "Amazing Grace", parts: "custom", customParts: ["1.1", "2.1"], size: 90 })
+        expect("measures" in nextMusicians).toBe(false)
+        expect("abc" in nextMusicians).toBe(false)
+
+        // Mutating merged customParts does not mutate original item
+        nextMusicians.customParts.push("1.2")
+        expect(musicians.customParts).toEqual(["1.1", "2.1"])
+
+        // Clearing owned fields removes music fields and preserves choices
+        const cleared = mergeSheetMusicOwnedFields(nextCongregation, {})
+        expect(cleared).toEqual({ parts: "upper", verses: "1", size: 120 })
     })
 })

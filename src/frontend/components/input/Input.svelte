@@ -38,7 +38,7 @@
         />
     {/if}
 {:else if input.type === "checkbox"}
-    <MaterialCheckbox {label} checked={input.value} style="flex: 1;{input.style || ''}" on:change={changed} />
+    <MaterialCheckbox {label} checked={input.value} disabled={input.disabled} style="flex: 1;{input.style || ''}" on:change={changed} />
 {:else if input.type === "color"}
     <MaterialColorInput {label} {...input} {...input.settings || {}} on:input={changed} />
 {:else}

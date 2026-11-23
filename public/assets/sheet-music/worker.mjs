@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -23,9 +23,14 @@ const canonicalMemo = new Map()
 
 let toolkitPromise = null
 let lastRenderLayouts = 0
+let lastRenderLog = ""
 
 export function getLastRenderLayouts() {
     return lastRenderLayouts
+}
+
+export function getLastRenderLog() {
+    return lastRenderLog
 }
 
 function getToolkit() {
@@ -115,24 +120,75 @@ export async function handleMessage(message) {
         }
     }
 
+    if (type === "slice") {
+        const { mei, first, last } = message
+        if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("load_failed", "No music data provided")
+
+        const totalMeasures = countMeasures(mei)
+        if (totalMeasures === 0) throw createWorkerError("empty_music", "No music measures found")
+
+        const startMeasure = Math.floor(Number(first))
+        const endMeasure = Math.floor(Number(last))
+        if (!Number.isFinite(startMeasure) || !Number.isFinite(endMeasure) || startMeasure < 1 || endMeasure < startMeasure || startMeasure > totalMeasures) {
+            throw createWorkerError("load_failed", "Invalid measure range")
+        }
+
+        const clampedLast = Math.min(endMeasure, totalMeasures)
+
+        try {
+            const markedMei = insertSlicePageBreaks(mei, startMeasure, clampedLast)
+            tk.resetOptions()
+            tk.resetXmlIdSeed(1)
+            tk.setOptions({ inputFrom: "mei", breaks: "encoded" })
+            const loaded = tk.loadData(markedMei)
+            if (!loaded) throw createWorkerError("load_failed", "Could not slice music")
+
+            const pageNo = startMeasure > 1 ? 2 : 1
+            const rawSlice = tk.getMEI({ pageNo, removeIds: true })
+            if (!rawSlice) throw createWorkerError("load_failed", "Could not extract music slice")
+
+            const activeMeter = startMeasure > 1 ? getActiveMeterAtMeasure(mei, startMeasure) : null
+            const keepMeterVisible = startMeasure === 1 || hasMeterChangeAtMeasure(mei, startMeasure)
+            const withActiveMeter = activeMeter ? applyInitialMeter(rawSlice, activeMeter) : rawSlice
+            const adjustedMeter = keepMeterVisible ? withActiveMeter : hideInitialMeter(withActiveMeter)
+            const slicedMei = normalizeMei(adjustedMeter)
+            const measures = countMeasures(slicedMei)
+            if (measures === 0) throw createWorkerError("empty_music", "No music measures found")
+
+            return { mei: slicedMei, measures }
+        } catch (err) {
+            if (err && typeof err === "object" && typeof err.code === "string") throw err
+            throw createWorkerError("load_failed", formatError(err, "Could not slice music"))
+        }
+    }
+
     if (type === "render") {
-        const { mei, pageWidth, ratio } = message
+        const { mei, pageWidth, ratio, showMeasureNumbers } = message
         if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
         const clampedWidth = Math.max(MIN_PAGE_WIDTH, Math.min(MAX_PAGE_WIDTH, parsedWidth))
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
+        const drawMeasureNumbers = Boolean(showMeasureNumbers)
+
+        const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
 
         try {
             const renderAt = (width) => {
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
-                const loaded = tk.loadData(mei)
-                if (!loaded) throw createWorkerError("render_failed", "Could not render music")
+                const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, pageWidth: width }
+                tk.setOptions(renderOptions)
+                tk.getLog()
+                const loaded = tk.loadData(renderMei)
+                if (!loaded) {
+                    lastRenderLog = tk.getLog().trim()
+                    throw createWorkerError("render_failed", "Could not render music")
+                }
 
                 const svg = tk.renderToSVG(1)
+                lastRenderLog = tk.getLog().trim()
                 if (!svg) throw createWorkerError("render_failed", "Could not render music")
                 const pages = tk.getPageCount()
                 return { svg, pages }
@@ -151,7 +207,7 @@ export async function handleMessage(message) {
                 }
             }
 
-            const canonicalKey = `${targetRatio}:${mei}`
+            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
             const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt, { canonical: cachedCanonical })
             lastRenderLayouts = fitted.layouts

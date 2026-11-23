@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { countMeasures, extractTitle, findFittingLayout, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -31,6 +31,61 @@ describe("mei pure helpers", () => {
         const mei = '<mei><section><measure n="1"/><measure n="2"><staff/></measure><measure><staff/></measure></section></mei>'
         expect(countMeasures(mei)).toBe(3)
         expect(countMeasures("<mei><section/></mei>")).toBe(0)
+    })
+
+    it("inserts slice page breaks around chosen measure positions and clears existing pb tags", () => {
+        const mei = '<mei><section><pb /><measure n="0"><staff/></measure><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>'
+        expect(insertSlicePageBreaks(mei, 2, 3)).toBe('<mei><section><measure n="0"><staff/></measure><pb/><measure n="1"><staff/></measure><measure n="2"><staff/></measure><pb/><measure n="3"><staff/></measure></section></mei>')
+        expect(insertSlicePageBreaks(mei, 1, 2)).toBe('<mei><section><measure n="0"><staff/></measure><measure n="1"><staff/></measure><pb/><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>')
+        expect(insertSlicePageBreaks(mei, 1, 4)).toBe('<mei><section><measure n="0"><staff/></measure><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>')
+    })
+
+    it("hides meter attributes and meterSig only on the initial scoreDef while keeping the meter", () => {
+        const mei = '<mei><scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><clef shape="G" line="2"/><meterSig count="4" unit="4"/></staffDef></staffGrp></scoreDef><section><scoreDef meter.count="3" meter.unit="4"><staffGrp><staffDef n="1"><meterSig count="3" unit="4"/></staffDef></staffGrp></scoreDef></section></mei>'
+        const hidden = hideInitialMeter(mei)
+
+        expect(hidden).toContain('<scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common" meter.visible="false">')
+        expect(hidden).toContain('<staffDef n="1" meter.count="4" meter.unit="4" meter.visible="false">')
+        expect(hidden).toContain('<meterSig count="4" unit="4" visible="false"/>')
+        expect(hidden).toContain('<scoreDef meter.count="3" meter.unit="4">')
+        expect(hidden).toContain('<meterSig count="3" unit="4"/>')
+    })
+
+    it("detects when the time signature changes right before a target measure", () => {
+        const mei = '<mei><scoreDef><staffGrp><staffDef n="1"><meterSig count="4" unit="4"/></staffDef></staffGrp></scoreDef><section>' + '<measure n="1"/><measure n="2"/>' + '<scoreDef><keySig sig="2s"/></scoreDef><measure n="3"/>' + '<scoreDef><meterSig count="3" unit="4"/></scoreDef><measure n="4"/>' + '<measure n="5"/>' + '<scoreDef meter.count="6" meter.unit="8"/><measure n="6"/>' + '<scoreDef meter.count="6" meter.unit="8"/><measure n="7"/>' + "</section></mei>"
+
+        expect(hasMeterChangeAtMeasure(mei, 1)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 2)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 3)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 4)).toBe(true)
+        expect(hasMeterChangeAtMeasure(mei, 5)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 6)).toBe(true)
+        expect(hasMeterChangeAtMeasure(mei, 7)).toBe(false)
+
+        expect(getActiveMeterAtMeasure(mei, 1)).toEqual({ count: "4", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 3)).toEqual({ count: "4", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 4)).toEqual({ count: "3", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 5)).toEqual({ count: "3", unit: "4", sym: null })
+        expect(getActiveMeterAtMeasure(mei, 7)).toEqual({ count: "6", unit: "8", sym: null })
+    })
+
+    it("replaces the initial meter on scoreDef, staffDef and meterSig and drops stale sym attributes", () => {
+        const slice = '<mei><scoreDef meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><meterSig count="4" unit="4" sym="common"/></staffDef></staffGrp></scoreDef><section><scoreDef><meterSig count="2" unit="4"/></scoreDef></section></mei>'
+        const updated = applyInitialMeter(slice, { count: "6", unit: "8", sym: null })
+
+        expect(updated).toContain('<scoreDef meter.count="6" meter.unit="8">')
+        expect(updated).toContain('<staffDef n="1" meter.count="6" meter.unit="8">')
+        expect(updated).toContain('<meterSig count="6" unit="8"/>')
+        expect(updated).toContain('<scoreDef><meterSig count="2" unit="4"/></scoreDef>')
+    })
+
+    it("hides measure numbers on scoreDef and removes explicit mNum elements", () => {
+        const mei = '<mei><scoreDef keysig="0"><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section><measure n="13"><mNum>13</mNum><staff n="1"/></measure><scoreDef mnum.visible="true"/><measure n="14"><mNum /></measure></section></mei>'
+        const hidden = hideMeasureNumbers(mei)
+
+        expect(hidden).toContain('<scoreDef keysig="0" mnum.visible="false">')
+        expect(hidden).toContain('<scoreDef mnum.visible="false"/>')
+        expect(hidden).not.toContain("<mNum")
     })
 
     it("removes attributes with external urls, CSS escapes or entity backslashes while keeping local urls and plain colors", () => {

@@ -8,7 +8,10 @@ interface PostedMessage {
     mei?: string
     pageWidth?: number
     ratio?: number
+    showMeasureNumbers?: boolean
     text?: string
+    first?: number
+    last?: number
 }
 
 class FakeWorker {
@@ -101,6 +104,30 @@ describe("sheetMusic engine client", () => {
             { svg: "<svg>shared</svg>", scale: 1, fits: true, pages: 1 },
             { svg: "<svg>shared</svg>", scale: 1, fits: true, pages: 1 }
         ])
+    })
+
+    it("keeps renders with measure numbers separate from default renders in flight and in cache", async () => {
+        const { renderMusic } = await import("./engine")
+
+        const pPlain = renderMusic("<mei>same</mei>", 1840)
+        const pNumbered = renderMusic("<mei>same</mei>", 1840, undefined, undefined, { showMeasureNumbers: true })
+
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toHaveLength(1)
+        expect(worker.posted[0].showMeasureNumbers).toBeUndefined()
+
+        worker.emitMessage({ id: worker.posted[0].id, ok: true, result: { svg: "<svg>plain</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pPlain).resolves.toEqual({ svg: "<svg>plain</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(2)
+        expect(worker.posted[1].showMeasureNumbers).toBe(true)
+        worker.emitMessage({ id: worker.posted[1].id, ok: true, result: { svg: "<svg>numbered</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pNumbered).resolves.toEqual({ svg: "<svg>numbered</svg>", scale: 1, fits: true, pages: 1 })
+
+        // Subsequent calls hit their own cache entries without posting again
+        await expect(renderMusic("<mei>same</mei>", 1840)).resolves.toEqual({ svg: "<svg>plain</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>same</mei>", 1840, undefined, undefined, { showMeasureNumbers: true })).resolves.toEqual({ svg: "<svg>numbered</svg>", scale: 1, fits: true, pages: 1 })
+        expect(worker.posted).toHaveLength(2)
     })
 
     it("surfaces ok:false worker errors with their code and maps every worker code to a real en.json key", async () => {
@@ -278,5 +305,27 @@ describe("sheetMusic engine client", () => {
         expect(secondWorker.terminated).toBe(false)
         vi.advanceTimersByTime(1)
         expect(secondWorker.terminated).toBe(true)
+    })
+
+    it("queues, cancels, times out and resolves sliceMusic requests like loadMusic", async () => {
+        const { sliceMusic, LOAD_TIMEOUT_MS, SheetMusicError } = await import("./engine")
+
+        const pSlice = sliceMusic("<mei>full</mei>", 5, 8)
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toEqual([{ id: 1, type: "slice", mei: "<mei>full</mei>", first: 5, last: 8 }])
+
+        worker.emitMessage({ id: 1, ok: true, result: { mei: "<mei>5-8</mei>", measures: 4 } })
+        await expect(pSlice).resolves.toEqual({ mei: "<mei>5-8</mei>", measures: 4 })
+
+        const ctrl = new AbortController()
+        const pCancel = sliceMusic("<mei>cancel</mei>", 1, 2, ctrl.signal)
+        ctrl.abort()
+        await expect(pCancel).rejects.toMatchObject({ code: "aborted" })
+        expect(worker.terminated).toBe(true)
+
+        const pTimeout = sliceMusic("<mei>slow</mei>", 2, 4)
+        vi.advanceTimersByTime(LOAD_TIMEOUT_MS)
+        await expect(pTimeout).rejects.toBeInstanceOf(SheetMusicError)
+        await expect(pTimeout).rejects.toMatchObject({ code: "timeout" })
     })
 })

@@ -8,7 +8,11 @@
     import Icon from "../../helpers/Icon.svelte"
     import T from "../../helpers/T.svelte"
     import { SheetMusicError, renderMusic } from "./sheetMusic/engine"
-    import { createRenderCacheKey, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicData, getSheetMusicSize, prefixSvgIds } from "./sheetMusic/helpers"
+    import { createRenderCacheKey, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, prefixSvgIds } from "./sheetMusic/helpers"
+    import type { SheetMusicPartsPreset } from "./sheetMusic/helpers"
+    import { filterMei, summarizeMei } from "./sheetMusic/meiParts"
+    import type { MeiSummary } from "./sheetMusic/meiParts"
+    import { resolvePartsSelection, resolveVersesSelection } from "./sheetMusic/parts"
 
     export let item: Item
     export let edit = false
@@ -25,6 +29,13 @@
     let destroyed = false
     let lastData = ""
     let lastKey = ""
+    let lastSummaryData = ""
+    let cachedSummary: MeiSummary | null = null
+    let lastFilterData = ""
+    let lastFilterParts: SheetMusicPartsPreset | undefined = undefined
+    let lastFilterCustomKey = ""
+    let lastFilterVerses = ""
+    let filteredMei = ""
     let debounceTimer: ReturnType<typeof setTimeout> | null = null
     let activeController: AbortController | null = null
 
@@ -44,10 +55,44 @@
         cancelPending()
     })
 
+    function getFilteredMei(rawMei: string, partsPreset: SheetMusicPartsPreset | undefined, customParts: string[] | undefined, customKey: string, versesRaw: string): string {
+        if (!rawMei) return ""
+        if ((!partsPreset || partsPreset === "all") && !versesRaw) return rawMei
+
+        if (rawMei === lastFilterData && partsPreset === lastFilterParts && customKey === lastFilterCustomKey && versesRaw === lastFilterVerses) {
+            return filteredMei
+        }
+
+        if (rawMei !== lastSummaryData || !cachedSummary) {
+            lastSummaryData = rawMei
+            cachedSummary = summarizeMei(rawMei)
+        }
+
+        const resolvedParts = resolvePartsSelection(partsPreset, customParts, cachedSummary)
+        const resolvedVerses = resolveVersesSelection(versesRaw, cachedSummary.verses)
+        const result = filterMei(rawMei, {
+            parts: resolvedParts.parts,
+            verses: resolvedVerses,
+            highestNoteOnly: resolvedParts.highestNoteOnly
+        })
+
+        lastFilterData = rawMei
+        lastFilterParts = partsPreset
+        lastFilterCustomKey = customKey
+        lastFilterVerses = versesRaw
+        filteredMei = result
+        return result
+    }
+
     $: data = getSheetMusicData(item?.sheet_music)
+    $: partsPreset = getSheetMusicParts(item?.sheet_music)
+    $: customParts = getSheetMusicCustomParts(item?.sheet_music)
+    $: customPartsKey = customParts ? customParts.join(",") : ""
+    $: versesRaw = getSheetMusicVerses(item?.sheet_music)
+    $: displayMei = getFilteredMei(data, partsPreset, customParts, customPartsKey, versesRaw)
     $: pageWidth = getPageWidthFromStyle(item?.style, getSheetMusicSize(item?.sheet_music))
     $: ratio = getItemRatioFromStyle(item?.style)
-    $: scheduleRender(data, pageWidth, ratio)
+    $: scheduleRender(displayMei, pageWidth, ratio)
 
     function scheduleRender(mei: string, width: number, boxRatio: number) {
         const musicChanged = mei !== lastData
