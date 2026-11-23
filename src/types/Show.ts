@@ -145,6 +145,7 @@ export interface Item {
     qr_code?: { text?: string; color?: string; background?: string }
     sheet_music?: {
         data?: string
+        abc?: string // the ABC text as typed or pasted, kept so the popup can edit it again. Missing on items made from a music file
         label?: string
         size?: number
     }

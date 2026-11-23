@@ -56,17 +56,22 @@ function getPdfWorkerFile() {
 }
 
 function getSheetMusicEngine() {
-    const pkgDir = join(__dirname, "..", "node_modules", "verovio")
+    const verovioDir = join(__dirname, "..", "node_modules", "verovio")
+    const abcjsDir = join(__dirname, "..", "node_modules", "abcjs")
     const outputDir = join(__dirname, "..", "public", "assets", "sheet-music")
 
     try {
-        const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"))
+        const pkg = JSON.parse(readFileSync(join(verovioDir, "package.json"), "utf8"))
         const header = `// Verovio ${pkg.version} (${pkg.license || "LGPL-3.0"})\n`
         mkdirSync(outputDir, { recursive: true })
 
         for (const fileName of ["verovio-module.mjs", "verovio.mjs"]) {
-            const content = readFileSync(join(pkgDir, "dist", fileName), "utf8")
+            const content = readFileSync(join(verovioDir, "dist", fileName), "utf8")
             writeFileSync(join(outputDir, fileName), header + content)
+        }
+
+        for (const fileName of ["abcjs-basic-min.js", "abcjs-basic-min.js.LICENSE"]) {
+            copyFileSync(join(abcjsDir, "dist", fileName), join(outputDir, fileName))
         }
     } catch (err) {
         console.error("Could not copy sheet music engine files:", err)

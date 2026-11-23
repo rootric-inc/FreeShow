@@ -20,6 +20,12 @@ export function getSheetMusicData(sheetMusic: unknown): string {
     return typeof data === "string" ? data : ""
 }
 
+export function getSheetMusicAbc(sheetMusic: unknown): string {
+    if (!sheetMusic || typeof sheetMusic !== "object") return ""
+    const abc = (sheetMusic as { abc?: unknown }).abc
+    return typeof abc === "string" ? abc : ""
+}
+
 export function getSheetMusicLabel(sheetMusic: unknown): string {
     if (!sheetMusic || typeof sheetMusic !== "object") return ""
     const label = (sheetMusic as { label?: unknown }).label
