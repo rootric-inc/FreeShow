@@ -110,9 +110,22 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         const loaded = await handleMessage({ type: "load", text: SAMPLE_MUSICXML })
 
         expect(loaded.title).toBe("Short & Sweet")
+        expect(loaded.composer).toBe("")
+        expect(loaded.lyricist).toBe("")
+        expect(loaded.copyright).toBe("")
         expect(loaded.measures).toBe(4)
         expect(loaded.mei).toContain('bar.thru="false"')
         expect(loaded.mei).not.toContain("<meiHead")
+    })
+
+    it("returns composer, lyricist and copyright from MusicXML metadata when present", async () => {
+        const withMetaXml = SAMPLE_MUSICXML.replace("<work><work-title>Short &amp; Sweet</work-title></work>", '<work><work-title>Abide With Me</work-title></work><identification><creator type="composer">William H. Monk</creator><creator type="lyricist">Henry F. Lyte</creator><rights>Public domain &amp; free</rights></identification>')
+
+        const loaded = await handleMessage({ type: "load", text: withMetaXml })
+        expect(loaded.title).toBe("Abide With Me")
+        expect(loaded.composer).toBe("William H. Monk")
+        expect(loaded.lyricist).toBe("Henry F. Lyte")
+        expect(loaded.copyright).toBe("Public domain & free")
     })
 
     it("renders MEI to SVG with the reply shape engine.ts reads and fits within a requested box ratio", async () => {

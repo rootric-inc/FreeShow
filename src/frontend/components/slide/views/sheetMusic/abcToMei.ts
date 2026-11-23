@@ -22,6 +22,10 @@ export interface AbcAnalysisResult extends AbcToMeiResult {
     hasError: boolean
 }
 
+export interface ConvertAbcOptions {
+    hideInitialMeter?: boolean
+}
+
 interface RawNotePitch extends NotePitch {
     startTie?: unknown
     endTie?: unknown
@@ -132,7 +136,7 @@ function hasVisibleMeasureContent(measure: VoiceMeasure | undefined): boolean {
     return measure.events.some((element) => element.el_type === "note" && !(element.rest && (element.rest.type === "invisible" || element.rest.type === "spacer")))
 }
 
-export function convertTuneToMei(tune: TuneObject | undefined, abc: string, declaredStaffVoices?: number[]): AbcToMeiResult {
+export function convertTuneToMei(tune: TuneObject | undefined, abc: string, declaredStaffVoices?: number[], options?: ConvertAbcOptions): AbcToMeiResult {
     const mapper = buildOffsetMapper(abc)
     const normalized = mapper.normalized
     const meta = tune && (tune as TuneObject & { metaText?: { title?: string } }).metaText
@@ -160,6 +164,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
 
     let currentMeter = firstStaves[0] && firstStaves[0].meter
     let currentMeterAttrs = formatMeterAttrs(currentMeter)
+    const initialMeterVisibleAttr = options?.hideInitialMeter && currentMeterAttrs ? ` meter.visible="false"` : ""
     const currentClefs = firstStaves.map((staff) => (staff.clef && staff.clef.type) || "treble")
     let pendingKey: KeySignature | undefined
     let pendingKeyFromPrimary = false
@@ -168,7 +173,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
     const pendingClefs: (string | undefined)[] = firstStaves.map(() => undefined)
 
     const staffDefinitions = firstStaves.map((staff, staffIndex) => `<staffDef n="${staffIndex + 1}" lines="5" ${formatClefAttrs(staff.clef && staff.clef.type)}/>`).join("")
-    const scoreOutput: string[] = [`<scoreDef keysig="${currentKey}"${currentMeterAttrs}><staffGrp${firstStaves.length > 1 ? ` symbol="brace"` : ""} bar.thru="false">${staffDefinitions}</staffGrp></scoreDef><section>`]
+    const scoreOutput: string[] = [`<scoreDef keysig="${currentKey}"${currentMeterAttrs}${initialMeterVisibleAttr}><staffGrp${firstStaves.length > 1 ? ` symbol="brace"` : ""} bar.thru="false">${staffDefinitions}</staffGrp></scoreDef><section>`]
 
     const inWordByVerse: Record<string, boolean> = {}
     const openSlurs: Record<string, OpenSlur> = {}
@@ -529,12 +534,12 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
     }
 }
 
-export function convertAndCheckAbc(abc: string, parseOnly: AbcParseOnly): AbcAnalysisResult {
+export function convertAndCheckAbc(abc: string, parseOnly: AbcParseOnly, options?: ConvertAbcOptions): AbcAnalysisResult {
     const tunes = parseAbcTunes(abc, parseOnly)
     const normalized = normalizeLineEndings(abc)
     const secondTuneLine = tunes.length > 1 ? findSecondTuneLine(normalized.split("\n")) : -1
     const declaredStaffVoices = getDeclaredStaffVoices(normalized, secondTuneLine)
-    const converted = convertTuneToMei(tunes[0], abc, declaredStaffVoices)
+    const converted = convertTuneToMei(tunes[0], abc, declaredStaffVoices, options)
     const problems = checkAbcTune(tunes, abc, converted.problems)
     return {
         ...converted,

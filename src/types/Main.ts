@@ -440,6 +440,7 @@ export type Popups =
     | "metadata_display"
     | "import_scripture"
     | "import_calendar"
+    | "import_sheet_music"
     | "create_collection"
     | "edit_event"
     | "edit_chart"

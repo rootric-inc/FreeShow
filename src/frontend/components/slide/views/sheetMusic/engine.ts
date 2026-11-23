@@ -5,6 +5,9 @@ export type LoadMusicSource = { text: string } | { base64: string }
 export interface LoadMusicResult {
     mei: string
     title: string
+    composer?: string
+    lyricist?: string
+    copyright?: string
     measures: number
 }
 

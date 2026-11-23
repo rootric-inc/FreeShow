@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -108,12 +108,12 @@ export async function handleMessage(message) {
             const rawMei = tk.getMEI({ removeIds: true })
             if (!rawMei) throw createWorkerError("load_failed", "Could not extract music data")
 
-            const title = extractTitle(rawMei)
+            const { title, composer, lyricist, copyright } = extractHeaderMetadata(rawMei)
             const mei = normalizeMei(rawMei)
             const measures = countMeasures(mei)
             if (measures === 0) throw createWorkerError("empty_music", "No music measures found")
 
-            return { mei, title, measures }
+            return { mei, title, composer, lyricist, copyright, measures }
         } catch (err) {
             if (err && typeof err === "object" && typeof err.code === "string") throw err
             throw createWorkerError("load_failed", formatError(err, "Could not read music file"))

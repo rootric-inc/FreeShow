@@ -28,13 +28,66 @@ export function decodeXmlEntities(text) {
     })
 }
 
+function cleanHeaderText(raw) {
+    return decodeXmlEntities(raw.replace(/<[^>]+>/g, " "))
+        .replace(/\s+/g, " ")
+        .trim()
+}
+
+function collectHeaderMatches(header, pattern) {
+    const values = []
+    const seen = new Set()
+    let match
+    while ((match = pattern.exec(header)) !== null) {
+        const cleaned = cleanHeaderText(match[1])
+        if (cleaned && !seen.has(cleaned)) {
+            seen.add(cleaned)
+            values.push(cleaned)
+        }
+    }
+    return values
+}
+
 export function extractTitle(mei) {
     const headMatch = mei.match(/<meiHead(?:\s[^>]*)?>([\s\S]*?)<\/meiHead>/)
     if (!headMatch) return ""
     const titleMatch = headMatch[1].match(/<title\b[^>]*>([\s\S]*?)<\/title>/)
     if (!titleMatch) return ""
-    const plain = titleMatch[1].replace(/<[^>]+>/g, " ")
-    return decodeXmlEntities(plain).replace(/\s+/g, " ").trim()
+    return cleanHeaderText(titleMatch[1])
+}
+
+export function extractHeaderMetadata(mei) {
+    const headMatch = mei.match(/<meiHead(?:\s[^>]*)?>([\s\S]*?)<\/meiHead>/)
+    if (!headMatch) return { title: "", composer: "", lyricist: "", copyright: "" }
+    const header = headMatch[1]
+
+    const titleMatch = header.match(/<title\b[^>]*>([\s\S]*?)<\/title>/)
+    const title = titleMatch ? cleanHeaderText(titleMatch[1]) : ""
+
+    let composers = collectHeaderMatches(header, /<(?:persName|corpName)\b[^>]*\brole=(?:"composer"|'composer')[^>]*>([\s\S]*?)<\/(?:persName|corpName)>/gi)
+    if (!composers.length) {
+        composers = collectHeaderMatches(header, /<composer\b[^>]*>([\s\S]*?)<\/composer>/gi)
+    }
+    const composer = composers.join(", ")
+
+    let lyricists = collectHeaderMatches(header, /<(?:persName|corpName)\b[^>]*\brole=(?:"lyricist"|'lyricist')[^>]*>([\s\S]*?)<\/(?:persName|corpName)>/gi)
+    if (!lyricists.length) {
+        lyricists = collectHeaderMatches(header, /<(?:persName|corpName)\b[^>]*\brole=(?:"(?:poet|author|words)"|'(?:poet|author|words)')[^>]*>([\s\S]*?)<\/(?:persName|corpName)>/gi)
+    }
+    if (!lyricists.length) {
+        lyricists = collectHeaderMatches(header, /<lyricist\b[^>]*>([\s\S]*?)<\/lyricist>/gi)
+    }
+    const lyricist = lyricists.join(", ")
+
+    let copyright = ""
+    const availabilityMatch = header.match(/<availability\b[^>]*>([\s\S]*?)<\/availability>/i)
+    if (availabilityMatch) {
+        const availabilityBody = availabilityMatch[1]
+        const rights = collectHeaderMatches(availabilityBody, /<(?:useRestrict|distributor)\b[^>]*>([\s\S]*?)<\/(?:useRestrict|distributor)>/gi)
+        copyright = rights.length ? rights.join(" ") : cleanHeaderText(availabilityBody)
+    }
+
+    return { title, composer, lyricist, copyright }
 }
 
 export function normalizeMei(mei) {
