@@ -32,10 +32,46 @@ export function getSheetMusicLabel(sheetMusic: unknown): string {
     return typeof label === "string" ? label : ""
 }
 
+export type SheetMusicPartsPreset = "all" | "upper" | "lower" | "melody" | "custom"
+
+const SHEET_MUSIC_PARTS_PRESETS = new Set<string>(["all", "upper", "lower", "melody", "custom"])
+
 export function getSheetMusicSize(sheetMusic: unknown): number | undefined {
     if (!sheetMusic || typeof sheetMusic !== "object") return undefined
     const size = (sheetMusic as { size?: unknown }).size
     return typeof size === "number" && Number.isFinite(size) ? size : undefined
+}
+
+export function getSheetMusicParts(sheetMusic: unknown): SheetMusicPartsPreset | undefined {
+    if (!sheetMusic || typeof sheetMusic !== "object") return undefined
+    const parts = (sheetMusic as { parts?: unknown }).parts
+    return typeof parts === "string" && SHEET_MUSIC_PARTS_PRESETS.has(parts) ? (parts as SheetMusicPartsPreset) : undefined
+}
+
+export function getSheetMusicCustomParts(sheetMusic: unknown): string[] | undefined {
+    if (!sheetMusic || typeof sheetMusic !== "object") return undefined
+    const customParts = (sheetMusic as { customParts?: unknown }).customParts
+    if (!Array.isArray(customParts)) return undefined
+    return customParts.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+}
+
+export function getSheetMusicVerses(sheetMusic: unknown): string {
+    if (!sheetMusic || typeof sheetMusic !== "object") return ""
+    const verses = (sheetMusic as { verses?: unknown }).verses
+    return typeof verses === "string" ? verses : ""
+}
+
+export function getSheetMusicMeasures(sheetMusic: unknown): string {
+    if (!sheetMusic || typeof sheetMusic !== "object") return ""
+    const measures = (sheetMusic as { measures?: unknown }).measures
+    return typeof measures === "string" ? measures : ""
+}
+
+export function getSheetMusicDisplayLabel(sheetMusic: unknown): string {
+    const label = getSheetMusicLabel(sheetMusic)
+    const measures = getSheetMusicMeasures(sheetMusic).trim()
+    if (!label) return ""
+    return measures ? `${label} (${measures})` : label
 }
 
 export function escapeHtml(text: string): string {

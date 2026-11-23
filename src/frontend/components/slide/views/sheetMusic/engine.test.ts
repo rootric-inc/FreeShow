@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicData, getSheetMusicLabel, getSheetMusicSize, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
+import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
 
 describe("sheetMusic page width and ratio math", () => {
     it("calculates page width for sizes 50, 100 and 200", () => {
@@ -162,5 +162,18 @@ describe("escapeHtml and safe sheet_music field readers", () => {
         expect(getSheetMusicSize({ size: "120" })).toBeUndefined()
         expect(getSheetMusicSize({ size: Number.NaN })).toBeUndefined()
         expect(getSheetMusicSize({ size: 125 })).toBe(125)
+        expect(getSheetMusicParts({ parts: "upper" })).toBe("upper")
+        expect(getSheetMusicParts({ parts: "invalid" })).toBeUndefined()
+        expect(getSheetMusicParts({ parts: 42 })).toBeUndefined()
+        expect(getSheetMusicCustomParts({ customParts: ["1.1", "2.1"] })).toEqual(["1.1", "2.1"])
+        expect(getSheetMusicCustomParts({ customParts: ["1.1", 42, ""] })).toEqual(["1.1"])
+        expect(getSheetMusicCustomParts({ customParts: "1.1" })).toBeUndefined()
+        expect(getSheetMusicVerses({ verses: "1,3" })).toBe("1,3")
+        expect(getSheetMusicVerses({ verses: 2 })).toBe("")
+        expect(getSheetMusicMeasures({ measures: "5-8" })).toBe("5-8")
+        expect(getSheetMusicMeasures({ measures: 5 })).toBe("")
+        expect(getSheetMusicDisplayLabel({ label: "Joy to the World", measures: "5-8" })).toBe("Joy to the World (5-8)")
+        expect(getSheetMusicDisplayLabel({ label: "Joy to the World" })).toBe("Joy to the World")
+        expect(getSheetMusicDisplayLabel({ measures: "5-8" })).toBe("")
     })
 })

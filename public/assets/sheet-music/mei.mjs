@@ -57,6 +57,23 @@ export function countMeasures(mei) {
     return matches ? matches.length : 0
 }
 
+export function insertSlicePageBreaks(mei, first, last) {
+    const cleaned = mei.replace(/<pb(?:\s[^>]*)?\/>|<pb(?:\s[^>]*)?>[\s\S]*?<\/pb>/g, "")
+    const total = countMeasures(cleaned)
+    let measureIndex = 0
+    return cleaned.replace(/<measure(?:\s[^>]*)?\/>|<measure(?:\s[^>]*)?>[\s\S]*?<\/measure>/g, (match) => {
+        measureIndex++
+        let out = match
+        if (measureIndex === first && first > 1) out = `<pb/>${out}`
+        if (measureIndex === last && last < total) out = `${out}<pb/>`
+        return out
+    })
+}
+
+export function stripInitialMeter(mei) {
+    return mei.replace(/<scoreDef\b[^>]*>[\s\S]*?<\/scoreDef>/, (block) => block.replace(/<meterSig(?:\s[^>]*)?\/>|<meterSig(?:\s[^>]*)?>[\s\S]*?<\/meterSig>/g, "").replace(/\s+meter\.(?:count|unit|sym)=(?:"[^"]*"|'[^']*')/g, ""))
+}
+
 function hasUnsafeCssReference(raw) {
     const decoded = decodeXmlEntities(raw)
     if (decoded.includes("\\")) return true

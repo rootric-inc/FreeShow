@@ -340,7 +340,7 @@ export function getItemKeys(isBox = false) {
     return itemKeys
 }
 
-const extraStyleLeaves = ["cropping.type"]
+const extraStyleLeaves = ["cropping.type", "sheet_music.customParts"]
 
 function getBoxStyleInputs(type?: ItemType): StyleInput[] {
     const inputs = Object.values(itemBoxes[type || "text"]?.sections || {})

@@ -501,4 +501,24 @@ describe("setStyleLeaf", () => {
         expect(first).toEqual({ music: "A", parts: ["Soprano", "Alto"] })
         expect(second).toEqual({ music: "B", parts: ["Soprano"] })
     })
+
+    it("keeps two sheet music items' own music and choices when updating parts, verses or customParts", () => {
+        const congregation = { data: "<mei>hymnA</mei>", label: "Hymn A", parts: "all", verses: "1" }
+        const musicians = { data: "<mei>hymnB</mei>", label: "Hymn B", parts: "upper", verses: "none", measures: "5-8" }
+
+        const nextCongregation = setStyleLeaf(congregation, "parts", "melody")
+        const nextMusicians = setStyleLeaf(musicians, "parts", "melody")
+
+        expect(nextCongregation).toEqual({ data: "<mei>hymnA</mei>", label: "Hymn A", parts: "melody", verses: "1" })
+        expect(nextMusicians).toEqual({ data: "<mei>hymnB</mei>", label: "Hymn B", parts: "melody", verses: "none", measures: "5-8" })
+
+        const custom = ["1.1", "2.1"]
+        const withCustomA = setStyleLeaf(nextCongregation, "customParts", custom)
+        const withCustomB = setStyleLeaf(nextMusicians, "customParts", custom)
+        withCustomA.customParts.push("1.2")
+
+        expect(withCustomA.data).toBe("<mei>hymnA</mei>")
+        expect(withCustomB.data).toBe("<mei>hymnB</mei>")
+        expect(withCustomB.customParts).toEqual(["1.1", "2.1"])
+    })
 })

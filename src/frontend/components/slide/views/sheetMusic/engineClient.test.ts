@@ -9,6 +9,8 @@ interface PostedMessage {
     pageWidth?: number
     ratio?: number
     text?: string
+    first?: number
+    last?: number
 }
 
 class FakeWorker {
@@ -278,5 +280,27 @@ describe("sheetMusic engine client", () => {
         expect(secondWorker.terminated).toBe(false)
         vi.advanceTimersByTime(1)
         expect(secondWorker.terminated).toBe(true)
+    })
+
+    it("queues, cancels, times out and resolves sliceMusic requests like loadMusic", async () => {
+        const { sliceMusic, LOAD_TIMEOUT_MS, SheetMusicError } = await import("./engine")
+
+        const pSlice = sliceMusic("<mei>full</mei>", 5, 8)
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toEqual([{ id: 1, type: "slice", mei: "<mei>full</mei>", first: 5, last: 8 }])
+
+        worker.emitMessage({ id: 1, ok: true, result: { mei: "<mei>5-8</mei>", measures: 4 } })
+        await expect(pSlice).resolves.toEqual({ mei: "<mei>5-8</mei>", measures: 4 })
+
+        const ctrl = new AbortController()
+        const pCancel = sliceMusic("<mei>cancel</mei>", 1, 2, ctrl.signal)
+        ctrl.abort()
+        await expect(pCancel).rejects.toMatchObject({ code: "aborted" })
+        expect(worker.terminated).toBe(true)
+
+        const pTimeout = sliceMusic("<mei>slow</mei>", 2, 4)
+        vi.advanceTimersByTime(LOAD_TIMEOUT_MS)
+        await expect(pTimeout).rejects.toBeInstanceOf(SheetMusicError)
+        await expect(pTimeout).rejects.toMatchObject({ code: "timeout" })
     })
 })

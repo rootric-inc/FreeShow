@@ -8,6 +8,11 @@ export interface LoadMusicResult {
     measures: number
 }
 
+export interface SliceMusicResult {
+    mei: string
+    measures: number
+}
+
 export interface RenderMusicResult {
     svg: string
     scale: number
@@ -59,7 +64,7 @@ interface Waiter<T> {
 
 interface QueuedJob<T = any> {
     id: number | null
-    type: "load" | "render"
+    type: "load" | "render" | "slice"
     payload: Record<string, unknown>
     timeoutMs: number
     cacheKey: string | null
@@ -84,7 +89,7 @@ let activeTimer: ReturnType<typeof setTimeout> | null = null
 let idleTimer: ReturnType<typeof setTimeout> | null = null
 let nextRequestId = 1
 
-function normalizeErrorCode(code: string | undefined, type: "load" | "render"): SheetMusicErrorCode {
+function normalizeErrorCode(code: string | undefined, type: "load" | "render" | "slice"): SheetMusicErrorCode {
     if (code === "load_failed" || code === "empty_music" || code === "render_failed" || code === "timeout") return code
     return type === "render" ? "render_failed" : "load_failed"
 }
@@ -247,13 +252,13 @@ function ensureWorker(): Worker {
     created.onerror = (event: ErrorEvent) => {
         if (worker !== created) return
         const message = event?.message ? `Sheet music worker failed: ${event.message}` : "Sheet music worker failed"
-        const code: SheetMusicErrorCode = activeJob?.type === "load" ? "load_failed" : "render_failed"
+        const code: SheetMusicErrorCode = activeJob?.type === "render" ? "render_failed" : "load_failed"
         failWorker(new SheetMusicError(code, message))
     }
 
     created.onmessageerror = () => {
         if (worker !== created) return
-        const code: SheetMusicErrorCode = activeJob?.type === "load" ? "load_failed" : "render_failed"
+        const code: SheetMusicErrorCode = activeJob?.type === "render" ? "render_failed" : "load_failed"
         failWorker(new SheetMusicError(code, "Sheet music worker sent an unreadable message"))
     }
 
@@ -277,7 +282,7 @@ function pumpQueue(): void {
         try {
             activeWorker = ensureWorker()
         } catch (err) {
-            const code: SheetMusicErrorCode = next.type === "load" ? "load_failed" : "render_failed"
+            const code: SheetMusicErrorCode = next.type === "render" ? "render_failed" : "load_failed"
             const message = err instanceof Error && err.message ? err.message : "Could not start sheet music worker"
             activeJob = next
             failWorker(new SheetMusicError(code, message))
@@ -306,7 +311,7 @@ function pumpQueue(): void {
             clearActiveTimer()
             activeJob = null
             releaseInFlight(next)
-            const code: SheetMusicErrorCode = next.type === "load" ? "load_failed" : "render_failed"
+            const code: SheetMusicErrorCode = next.type === "render" ? "render_failed" : "load_failed"
             const message = err instanceof Error && err.message ? err.message : "Could not send message to sheet music worker"
             settleJobError(next, new SheetMusicError(code, message))
         }
@@ -363,6 +368,26 @@ export function loadMusic(source: LoadMusicSource, signal?: AbortSignal): Promis
         id: null,
         type: "load",
         payload: { type: "load", ...source },
+        timeoutMs: LOAD_TIMEOUT_MS,
+        cacheKey: null,
+        waiters: new Set()
+    }
+
+    const promise = attachWaiter(job, signal)
+    queue.push(job)
+    pumpQueue()
+    return promise
+}
+
+export function sliceMusic(mei: string, first: number, last: number, signal?: AbortSignal): Promise<SliceMusicResult> {
+    if (signal?.aborted) {
+        return Promise.reject(new SheetMusicError("aborted", "Sheet music request cancelled"))
+    }
+
+    const job: QueuedJob<SliceMusicResult> = {
+        id: null,
+        type: "slice",
+        payload: { type: "slice", mei, first, last },
         timeoutMs: LOAD_TIMEOUT_MS,
         cacheKey: null,
         waiters: new Set()

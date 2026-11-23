@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, insertSlicePageBreaks, normalizeMei, sanitizeSvg, stripInitialMeter, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -112,6 +112,45 @@ export async function handleMessage(message) {
         } catch (err) {
             if (err && typeof err === "object" && typeof err.code === "string") throw err
             throw createWorkerError("load_failed", formatError(err, "Could not read music file"))
+        }
+    }
+
+    if (type === "slice") {
+        const { mei, first, last } = message
+        if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("load_failed", "No music data provided")
+
+        const totalMeasures = countMeasures(mei)
+        if (totalMeasures === 0) throw createWorkerError("empty_music", "No music measures found")
+
+        const startMeasure = Math.floor(Number(first))
+        const endMeasure = Math.floor(Number(last))
+        if (!Number.isFinite(startMeasure) || !Number.isFinite(endMeasure) || startMeasure < 1 || endMeasure < startMeasure || startMeasure > totalMeasures) {
+            throw createWorkerError("load_failed", "Invalid measure range")
+        }
+
+        const clampedLast = Math.min(endMeasure, totalMeasures)
+
+        try {
+            const markedMei = insertSlicePageBreaks(mei, startMeasure, clampedLast)
+            tk.resetOptions()
+            tk.resetXmlIdSeed(1)
+            tk.setOptions({ inputFrom: "mei", breaks: "encoded" })
+            const loaded = tk.loadData(markedMei)
+            if (!loaded) throw createWorkerError("load_failed", "Could not slice music")
+
+            const pageNo = startMeasure > 1 ? 2 : 1
+            const rawSlice = tk.getMEI({ pageNo, removeIds: true })
+            if (!rawSlice) throw createWorkerError("load_failed", "Could not extract music slice")
+
+            const withoutMeter = startMeasure > 1 ? stripInitialMeter(rawSlice) : rawSlice
+            const slicedMei = normalizeMei(withoutMeter)
+            const measures = countMeasures(slicedMei)
+            if (measures === 0) throw createWorkerError("empty_music", "No music measures found")
+
+            return { mei: slicedMei, measures }
+        } catch (err) {
+            if (err && typeof err === "object" && typeof err.code === "string") throw err
+            throw createWorkerError("load_failed", formatError(err, "Could not slice music"))
         }
     }
 

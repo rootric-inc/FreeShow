@@ -2,6 +2,7 @@
     import { onDestroy, onMount, tick } from "svelte"
     import { uid } from "uid"
     import type { DropdownOptions } from "../../../../types/Input"
+    import type { Item } from "../../../../types/Show"
     import { Main } from "../../../../types/IPC/Main"
     import { ToMain } from "../../../../types/IPC/ToMain"
     import type { TabsObj } from "../../../../types/Tabs"
@@ -14,6 +15,7 @@
     import InputRow from "../../input/InputRow.svelte"
     import MaterialButton from "../../inputs/MaterialButton.svelte"
     import MaterialDropdown from "../../inputs/MaterialDropdown.svelte"
+    import MaterialTextInput from "../../inputs/MaterialTextInput.svelte"
     import type { AbcProblem } from "../../slide/views/sheetMusic/abcChecks"
     import { mergeNeighborProblems } from "../../slide/views/sheetMusic/abcChecks"
     import type { AbcjsGlobal } from "../../slide/views/sheetMusic/abcjs"
@@ -22,19 +24,22 @@
     import { ABC_KEYS, ABC_METERS, adjustCursorForEdit, createAbcTemplate, insertAbcAtCursor, normalizeLineEndings, readAbcHeader, updateAbcHeaderField } from "../../slide/views/sheetMusic/abcSource"
     import type { AbcAnalysisResult, AbcNoteRange } from "../../slide/views/sheetMusic/abcToMei"
     import { convertAndCheckAbc } from "../../slide/views/sheetMusic/abcToMei"
-    import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic } from "../../slide/views/sheetMusic/engine"
-    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicSize, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
+    import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic, sliceMusic } from "../../slide/views/sheetMusic/engine"
+    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicSize, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
+    import { formatMeasureRange, parseMeasureRange } from "../../slide/views/sheetMusic/parts"
     import Tabs from "../Tabs.svelte"
     import AbcProblemList from "./sheetMusic/AbcProblemList.svelte"
     import AbcReference from "./sheetMusic/AbcReference.svelte"
 
     type PopupTab = "type" | "file"
 
-    interface SheetMusicState {
+    type SheetMusicState = NonNullable<Item["sheet_music"]> & Record<string, unknown>
+
+    interface OwnedSheetMusicFields {
         data?: string
         abc?: string
         label?: string
-        size?: number
+        measures?: string
     }
 
     interface TaskOptions {
@@ -64,27 +69,33 @@
     }
 
     function readInitialState(raw: unknown): SheetMusicState {
-        const state: SheetMusicState = {}
-        const data = getSheetMusicData(raw)
-        const abc = getSheetMusicAbc(raw)
-        const label = getSheetMusicLabel(raw)
-        const size = getSheetMusicSize(raw)
-
-        if (data) state.data = data
-        if (abc) state.abc = abc
-        if (label) state.label = label
-        if (size !== undefined) state.size = size
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+        const source = raw as Record<string, unknown>
+        const state: SheetMusicState = { ...source }
+        if (Array.isArray(source.customParts)) state.customParts = [...source.customParts]
         return state
     }
 
     let current: SheetMusicState = readInitialState($popupData.active)
-    let activeTab: PopupTab = current.data && !current.abc ? "file" : "type"
+    $: currentData = getSheetMusicData(current)
+    $: currentAbc = getSheetMusicAbc(current)
+    $: currentLabel = getSheetMusicLabel(current)
+    $: currentMeasures = getSheetMusicMeasures(current)
+
+    let activeTab: PopupTab = getSheetMusicData(current) && !getSheetMusicAbc(current) ? "file" : "type"
     let previousTab: PopupTab = activeTab
 
-    let text = normalizeLineEndings(current.abc || "")
+    let text = normalizeLineEndings(getSheetMusicAbc(current))
     let lastSavedAbc = text
     let loadedAbcjs: AbcjsGlobal | null = getLoadedAbcjs()
     let applyingProgrammaticEdit = false
+
+    let openedFileMei = ""
+    let openedFileLabel = ""
+    let openedFileMeasures = 0
+    let measuresInput = ""
+    let measuresInvalid = false
+    let lastAppliedRangeKey = ""
 
     const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
     let selectedKey = initialHeader.key
@@ -190,6 +201,26 @@
         }
     }
 
+    function saveOwnedFields(fields: OwnedSheetMusicFields): void {
+        const nextState: SheetMusicState = { ...current }
+        for (const key of ["data", "abc", "label", "measures"] as const) {
+            const value = fields[key]
+            if (value) nextState[key] = value
+            else delete nextState[key]
+        }
+        current = nextState
+        if (!destroyed && onSave) onSave({ ...nextState })
+    }
+
+    function clearOpenedFile(): void {
+        openedFileMei = ""
+        openedFileLabel = ""
+        openedFileMeasures = 0
+        measuresInput = ""
+        measuresInvalid = false
+        lastAppliedRangeKey = ""
+    }
+
     // Single synchronous save path used by typing, tab switches and popup close
     function saveAbc(source: string, precomputedAnalysis?: AbcAnalysisResult): void {
         if (destroyed) return
@@ -197,16 +228,14 @@
         if (normalized === lastSavedAbc) return
 
         if (!normalized.trim()) {
-            if (!current.abc) return
-            const clearedState: SheetMusicState = {}
-            if (current.size !== undefined) clearedState.size = current.size
+            if (!getSheetMusicAbc(current)) return
             lastSavedAbc = ""
-            current = clearedState
+            clearOpenedFile()
+            saveOwnedFields({})
             previewSvg = ""
             previewData = ""
             truncated = false
             hasAbcError = false
-            if (onSave) onSave({ ...clearedState })
             return
         }
 
@@ -219,16 +248,13 @@
         }
         if (!analysis.mei || analysis.hasError) return
 
-        const nextState: SheetMusicState = {
-            abc: normalized,
-            data: analysis.mei
-        }
-        if (analysis.title) nextState.label = analysis.title
-        if (current.size !== undefined) nextState.size = current.size
-
         lastSavedAbc = normalized
-        current = nextState
-        if (onSave) onSave({ ...nextState })
+        clearOpenedFile()
+        saveOwnedFields({
+            abc: normalized,
+            data: analysis.mei,
+            label: analysis.title || undefined
+        })
     }
 
     function flushPendingSave() {
@@ -253,8 +279,8 @@
         if (activeTab === "type") {
             if (text.trim()) runConvert(text, false)
             else preloadParser()
-        } else if (activeTab === "file" && current.data) {
-            renderFilePreview(current.data)
+        } else if (activeTab === "file" && currentData) {
+            renderFilePreview(currentData)
         }
     })
 
@@ -275,8 +301,9 @@
         if (tab === "file") {
             flushPendingSave()
             applyHighlight("")
-            if (current.data) {
-                if (current.data !== previewData || !previewSvg) renderFilePreview(current.data)
+            const latestData = getSheetMusicData(current)
+            if (latestData) {
+                if (latestData !== previewData || !previewSvg) renderFilePreview(latestData)
             } else {
                 previewSvg = ""
                 previewData = ""
@@ -311,7 +338,7 @@
     }
 
     function renderMei(mei: string, signal: AbortSignal) {
-        return renderMusic(mei, calculatePageWidth(1530, current.size), undefined, signal)
+        return renderMusic(mei, calculatePageWidth(1530, getSheetMusicSize(current)), undefined, signal)
     }
 
     function renderFilePreview(mei: string) {
@@ -345,23 +372,104 @@
                 const rendered = await renderMei(loaded.mei, signal)
                 if (!isLive()) return
 
-                const nextState: SheetMusicState = {
-                    data: loaded.mei,
-                    label: loaded.title || removeExtension(getFileName(filePath))
-                }
-                if (current.size !== undefined) nextState.size = current.size
+                const fileLabel = loaded.title || removeExtension(getFileName(filePath))
+                openedFileMei = loaded.mei
+                openedFileLabel = fileLabel
+                openedFileMeasures = loaded.measures
+                measuresInput = ""
+                measuresInvalid = false
+                lastAppliedRangeKey = ""
 
                 lastSavedAbc = ""
                 text = ""
-                current = nextState
+                saveOwnedFields({
+                    data: loaded.mei,
+                    label: fileLabel
+                })
                 previewData = loaded.mei
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
                 truncated = rendered.pages > 1
-
-                if (!destroyed && onSave) onSave({ ...current })
             },
             { fallbackError: "load" }
         )
+    }
+
+    function applyMeasureSlice(first: number, last: number, existingToken?: number) {
+        const sourceMei = openedFileMei
+        const sourceLabel = openedFileLabel
+        if (!sourceMei) return
+
+        const rangeLabel = formatMeasureRange(first, last)
+        truncated = false
+        runTask(
+            async (signal, isLive) => {
+                const sliced = await sliceMusic(sourceMei, first, last, signal)
+                if (!isLive()) return
+
+                const rendered = await renderMei(sliced.mei, signal)
+                if (!isLive()) return
+
+                lastAppliedRangeKey = rangeLabel
+                saveOwnedFields({
+                    data: sliced.mei,
+                    label: sourceLabel,
+                    measures: rangeLabel
+                })
+                previewData = sliced.mei
+                previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
+                truncated = rendered.pages > 1
+            },
+            { fallbackError: "load", existingToken }
+        )
+    }
+
+    function handleMeasuresInput(value: string, immediate = false) {
+        measuresInput = typeof value === "string" ? value : ""
+        if (!openedFileMei) return
+
+        const trimmed = measuresInput.trim()
+        if (!trimmed) {
+            measuresInvalid = false
+            error = ""
+            if (lastAppliedRangeKey === "" && getSheetMusicData(current) === openedFileMei && !getSheetMusicMeasures(current)) {
+                cancelPending()
+                requestToken++
+                loading = false
+                return
+            }
+            lastAppliedRangeKey = ""
+            saveOwnedFields({
+                data: openedFileMei,
+                label: openedFileLabel
+            })
+            renderFilePreview(openedFileMei)
+            return
+        }
+
+        const range = parseMeasureRange(trimmed, openedFileMeasures)
+        if (!range) {
+            measuresInvalid = true
+            cancelPending()
+            requestToken++
+            loading = false
+            return
+        }
+
+        measuresInvalid = false
+        const rangeKey = formatMeasureRange(range.first, range.last)
+        if (rangeKey === lastAppliedRangeKey && debounceTimer === null && activeController === null) return
+
+        if (immediate) {
+            applyMeasureSlice(range.first, range.last)
+            return
+        }
+
+        cancelPending()
+        const token = ++requestToken
+        debounceTimer = setTimeout(() => {
+            debounceTimer = null
+            if (!destroyed && token === requestToken) applyMeasureSlice(range.first, range.last, token)
+        }, 250)
     }
 
     function syncHeader(source: string) {
@@ -604,7 +712,7 @@
     <Tabs tabs={popupTabs} bind:active={activeTab} labels style="font-weight: normal;" />
 
     {#if activeTab === "type"}
-        {#if current.data && !current.abc && !text.trim()}
+        {#if currentData && !currentAbc && !text.trim()}
             <p class="notice"><T id="sheet_music.type_replaces_file" /></p>
         {/if}
 
@@ -645,8 +753,27 @@
             <MaterialButton variant="outlined" icon="music" disabled={loading} on:click={openFile} style="flex: 1;"><T id="actions.open_file" /></MaterialButton>
         </InputRow>
 
-        {#if current.label}
-            <p class="label">{current.label}</p>
+        {#if openedFileMei}
+            <div class="fileInfo">
+                {#if openedFileLabel}
+                    <p class="label">{openedFileLabel}</p>
+                {/if}
+                <div class="measuresField" class:invalid={measuresInvalid}>
+                    <MaterialTextInput label="sheet_music.measures" value={measuresInput} placeholder={openedFileMeasures > 1 ? `1-${openedFileMeasures}` : "1"} on:input={(e) => handleMeasuresInput(e.detail, false)} on:change={(e) => handleMeasuresInput(e.detail, true)} />
+                    {#if measuresInvalid}
+                        <p class="error"><T id="sheet_music.measures_invalid" /></p>
+                    {/if}
+                </div>
+            </div>
+        {:else if currentLabel || currentMeasures}
+            <div class="fileInfo">
+                {#if currentLabel}
+                    <p class="label">{currentLabel}</p>
+                {/if}
+                {#if currentMeasures}
+                    <p class="measuresText"><T id="sheet_music.measures_value" replace={[currentMeasures]} /></p>
+                {/if}
+            </div>
         {/if}
     {/if}
 
@@ -771,12 +898,41 @@
         font-size: 0.9em;
     }
 
+    .fileInfo {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
     .label {
         font-size: 0.95em;
         opacity: 0.85;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+    }
+
+    .measuresText {
+        font-size: 0.85em;
+        opacity: 0.7;
+    }
+
+    .measuresField {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .measuresField.invalid :global(.textfield) {
+        border-bottom-color: #ff6b6b;
+    }
+
+    .measuresField.invalid :global(label) {
+        color: #ff6b6b;
+    }
+
+    .measuresField.invalid :global(.underline) {
+        background-color: #ff6b6b;
     }
 
     .preview {

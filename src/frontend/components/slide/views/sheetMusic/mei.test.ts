@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { countMeasures, extractTitle, findFittingLayout, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { countMeasures, extractTitle, findFittingLayout, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, stripInitialMeter, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -31,6 +31,22 @@ describe("mei pure helpers", () => {
         const mei = '<mei><section><measure n="1"/><measure n="2"><staff/></measure><measure><staff/></measure></section></mei>'
         expect(countMeasures(mei)).toBe(3)
         expect(countMeasures("<mei><section/></mei>")).toBe(0)
+    })
+
+    it("inserts slice page breaks around chosen measure positions and clears existing pb tags", () => {
+        const mei = '<mei><section><pb /><measure n="0"><staff/></measure><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>'
+        expect(insertSlicePageBreaks(mei, 2, 3)).toBe('<mei><section><measure n="0"><staff/></measure><pb/><measure n="1"><staff/></measure><measure n="2"><staff/></measure><pb/><measure n="3"><staff/></measure></section></mei>')
+        expect(insertSlicePageBreaks(mei, 1, 2)).toBe('<mei><section><measure n="0"><staff/></measure><measure n="1"><staff/></measure><pb/><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>')
+        expect(insertSlicePageBreaks(mei, 1, 4)).toBe('<mei><section><measure n="0"><staff/></measure><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>')
+    })
+
+    it("strips meter attributes and meterSig only from the initial scoreDef", () => {
+        const mei = '<mei><scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><clef shape="G" line="2"/><meterSig count="4" unit="4" visible="false"/></staffDef></staffGrp></scoreDef><section><scoreDef meter.count="3" meter.unit="4"><staffGrp><staffDef n="1"><meterSig count="3" unit="4"/></staffDef></staffGrp></scoreDef></section></mei>'
+        const stripped = stripInitialMeter(mei)
+
+        expect(stripped).toContain('<scoreDef keysig="2f"><staffGrp><staffDef n="1"><clef shape="G" line="2"/></staffDef></staffGrp></scoreDef>')
+        expect(stripped).toContain('<scoreDef meter.count="3" meter.unit="4">')
+        expect(stripped).toContain('<meterSig count="3" unit="4"/>')
     })
 
     it("removes attributes with external urls, CSS escapes or entity backslashes while keeping local urls and plain colors", () => {

@@ -782,7 +782,40 @@ export const itemBoxes: Box2 = {
                 inputs: [
                     [{ type: "popup", id: "sheet_music", value: {}, values: { label: "popup.edit_sheet_music", name: "actions.open_file", icon: "music", popupId: "edit_sheet_music", allowEmpty: false } }],
                     [{ id: "style", key: "color", type: "color", value: "#ffffff", values: { label: "edit.color", defaultValue: "#ffffff", allowOpacity: true, allowEmpty: true } }],
-                    [{ type: "number", id: "sheet_music.size", value: 100, values: { label: "edit.size", defaultValue: 100, step: 1, min: 50, max: 200, showSlider: true } }]
+                    [{ type: "number", id: "sheet_music.size", value: 100, values: { label: "edit.size", defaultValue: 100, step: 1, min: 50, max: 200, showSlider: true } }],
+                    [
+                        {
+                            type: "dropdown",
+                            id: "sheet_music.parts",
+                            value: "all",
+                            hidden: true,
+                            values: {
+                                label: "sheet_music.parts",
+                                options: [
+                                    { value: "all", label: "sheet_music.parts_all" },
+                                    { value: "upper", label: "sheet_music.parts_upper" },
+                                    { value: "lower", label: "sheet_music.parts_lower" },
+                                    { value: "melody", label: "sheet_music.parts_melody" },
+                                    { value: "custom", label: "sheet_music.parts_custom" }
+                                ]
+                            }
+                        }
+                    ],
+                    [
+                        {
+                            type: "dropdown",
+                            id: "sheet_music.verses",
+                            value: "",
+                            hidden: true,
+                            values: {
+                                label: "sheet_music.verses",
+                                options: [
+                                    { value: "", label: "sheet_music.verses_all" },
+                                    { value: "none", label: "sheet_music.verses_none" }
+                                ]
+                            }
+                        }
+                    ]
                 ]
             }
         }
