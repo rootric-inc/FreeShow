@@ -1,12 +1,14 @@
 export interface MeiStaffSummary {
     n: string
     layers: string[]
+    hasChords: boolean
 }
 
 export interface MeiSummary {
     staves: MeiStaffSummary[]
     verses: number[]
     measures: number
+    hasTwoLayersPerStaffInEveryBar: boolean
 }
 
 export interface FilterMeiOptions {
@@ -22,10 +24,33 @@ interface ParsedAttr {
     value: string
 }
 
+interface SubtreeResult {
+    html: string
+    nextIndex: number
+    slice: XmlToken[]
+}
+
+interface RescuedClef {
+    html: string
+    ids: string[]
+}
+
+interface VerseFilterContext {
+    filteringVerses: boolean
+    keptVerses: Set<number> | null
+    verseRenumberMap: Map<number, number>
+}
+
+interface AccidentalContext {
+    removedWritten: Map<string, Set<string>>
+    resolvedOnKept: Set<string>
+}
+
 interface ChordNoteEntry {
     attrsRaw: string
-    verses: string[]
-    otherChildren: string[]
+    rawVerses: SubtreeResult[]
+    otherSubtrees: SubtreeResult[]
+    otherRaw: string[]
     removedIds: string[]
 }
 
@@ -182,12 +207,42 @@ function getNoteRank(attrsRaw: string): number {
     return oct * 7 + pitchIndex
 }
 
+export function getMeasureNumbers(mei: string): number[] {
+    if (!mei || typeof mei !== "string") return []
+
+    const tokens = scanXml(mei)
+    const rawNumbers: (string | null)[] = []
+    for (const token of tokens) {
+        if ((token.kind === "open" || token.kind === "self") && token.name === "measure") {
+            rawNumbers.push(getAttr(token.attrsRaw, "n"))
+        }
+    }
+
+    if (!rawNumbers.length) return []
+
+    const parsed: number[] = []
+    for (let i = 0; i < rawNumbers.length; i++) {
+        const raw = rawNumbers[i]
+        if (raw === null) return rawNumbers.map((_, idx) => idx + 1)
+        const trimmed = raw.trim()
+        if (!/^\d+$/.test(trimmed)) return rawNumbers.map((_, idx) => idx + 1)
+        const value = Number(trimmed)
+        if (i > 0 && value < parsed[i - 1]) return rawNumbers.map((_, idx) => idx + 1)
+        parsed.push(value)
+    }
+
+    return parsed
+}
+
 export function summarizeMei(mei: string): MeiSummary {
-    if (!mei || typeof mei !== "string") return { staves: [], verses: [], measures: 0 }
+    if (!mei || typeof mei !== "string") return { staves: [], verses: [], measures: 0, hasTwoLayersPerStaffInEveryBar: false }
 
     const tokens = scanXml(mei)
     const staffLayers = new Map<string, Set<string>>()
+    const staffHasChords = new Set<string>()
     const verses = new Set<number>()
+    const measureStaffLayers: Map<string, Set<string>>[] = []
+    let currentMeasureLayers: Map<string, Set<string>> | null = null
     let measures = 0
 
     const staffStack: string[] = []
@@ -200,6 +255,7 @@ export function summarizeMei(mei: string): MeiSummary {
 
         if (token.kind === "close") {
             if (token.name === "staff" && staffStack.length > 0) staffStack.pop()
+            else if (token.name === "measure") currentMeasureLayers = null
             continue
         }
 
@@ -208,6 +264,9 @@ export function summarizeMei(mei: string): MeiSummary {
             if (staffN) ensureStaff(staffN)
         } else if (token.name === "measure") {
             measures++
+            const measureMap = new Map<string, Set<string>>()
+            measureStaffLayers.push(measureMap)
+            if (token.kind === "open") currentMeasureLayers = measureMap
         } else if (token.name === "staff") {
             const staffN = getAttr(token.attrsRaw, "n")
             if (staffN) {
@@ -219,7 +278,14 @@ export function summarizeMei(mei: string): MeiSummary {
             if (currentStaff) {
                 const layerN = getAttr(token.attrsRaw, "n") || "1"
                 staffLayers.get(currentStaff)!.add(layerN)
+                if (currentMeasureLayers) {
+                    if (!currentMeasureLayers.has(currentStaff)) currentMeasureLayers.set(currentStaff, new Set())
+                    currentMeasureLayers.get(currentStaff)!.add(layerN)
+                }
             }
+        } else if (token.name === "chord") {
+            const currentStaff = staffStack[staffStack.length - 1]
+            if (currentStaff) staffHasChords.add(currentStaff)
         } else if (token.name === "verse") {
             const verseNumber = parseVerseNumber(getAttr(token.attrsRaw, "n"))
             if (verseNumber !== null) verses.add(verseNumber)
@@ -228,13 +294,16 @@ export function summarizeMei(mei: string): MeiSummary {
 
     const staves: MeiStaffSummary[] = []
     for (const [n, layers] of staffLayers) {
-        staves.push({ n, layers: sortNumericStrings(Array.from(layers)) })
+        staves.push({ n, layers: sortNumericStrings(Array.from(layers)), hasChords: staffHasChords.has(n) })
     }
+
+    const hasTwoLayersPerStaffInEveryBar = staves.length === 2 && staves[0].layers.length === 2 && staves[1].layers.length === 2 && measures > 0 && measureStaffLayers.length === measures && measureStaffLayers.every((measureMap) => (measureMap.get(staves[0].n)?.size ?? 0) === 2 && (measureMap.get(staves[1].n)?.size ?? 0) === 2)
 
     return {
         staves,
         verses: Array.from(verses).sort((a, b) => a - b),
-        measures
+        measures,
+        hasTwoLayersPerStaffInEveryBar
     }
 }
 
@@ -247,7 +316,18 @@ function collectElementIds(tokens: XmlToken[], target: Set<string>): void {
     }
 }
 
-function serializeSubtree(tokens: XmlToken[], startIndex: number): { html: string; nextIndex: number; slice: XmlToken[] } {
+function extractElementIds(tokens: XmlToken[]): string[] {
+    const ids: string[] = []
+    for (const token of tokens) {
+        if (token.kind === "open" || token.kind === "self") {
+            const xmlId = getAttr(token.attrsRaw, "xml:id")
+            if (xmlId) ids.push(xmlId)
+        }
+    }
+    return ids
+}
+
+function serializeSubtree(tokens: XmlToken[], startIndex: number): SubtreeResult {
     const first = tokens[startIndex]
     if (first.kind === "self") {
         return { html: first.raw, nextIndex: startIndex + 1, slice: [first] }
@@ -271,8 +351,219 @@ function serializeSubtree(tokens: XmlToken[], startIndex: number): { html: strin
     }
 }
 
-function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem: boolean, shouldKeepVerse: (verseAttr: string | null) => boolean, removedIds: Set<string>, remappedIds: Map<string, string>): string {
-    const chordVerses: string[] = []
+function renumberVerseSubtree(slice: XmlToken[], newNumber: number): string {
+    const first = slice[0]
+    if (!first || (first.kind !== "open" && first.kind !== "self")) {
+        return slice.map((token) => token.raw).join("")
+    }
+
+    const updatedAttrs = setAttr(first.attrsRaw, "n", String(newNumber))
+    const head = formatTag(first.kind, first.name, updatedAttrs)
+    if (slice.length === 1) return head
+    return (
+        head +
+        slice
+            .slice(1)
+            .map((token) => token.raw)
+            .join("")
+    )
+}
+
+function filterVerseSubtrees(verseSubtrees: SubtreeResult[], verseCtx: VerseFilterContext, removedIds: Set<string>): string[] {
+    if (!verseSubtrees.length) return []
+    if (!verseCtx.filteringVerses || verseCtx.keptVerses === null) {
+        return verseSubtrees.map((subtree) => subtree.html)
+    }
+    if (verseCtx.keptVerses.size === 0) {
+        for (const subtree of verseSubtrees) collectElementIds(subtree.slice, removedIds)
+        return []
+    }
+    if (verseSubtrees.length === 1) {
+        return [renumberVerseSubtree(verseSubtrees[0].slice, 1)]
+    }
+
+    const kept: string[] = []
+    for (const subtree of verseSubtrees) {
+        const first = subtree.slice[0]
+        const rawN = first && (first.kind === "open" || first.kind === "self") ? getAttr(first.attrsRaw, "n") : null
+        const verseNumber = parseVerseNumber(rawN)
+        if (verseNumber === null) {
+            kept.push(renumberVerseSubtree(subtree.slice, 1))
+        } else if (verseCtx.keptVerses.has(verseNumber)) {
+            const mapped = verseCtx.verseRenumberMap.get(verseNumber) ?? 1
+            kept.push(renumberVerseSubtree(subtree.slice, mapped))
+        } else {
+            collectElementIds(subtree.slice, removedIds)
+        }
+    }
+    return kept
+}
+
+function getPitchKey(attrsRaw: string): string | null {
+    const pname = getAttr(attrsRaw, "pname")
+    const oct = getAttr(attrsRaw, "oct")
+    if (!pname || !oct) return null
+    return `${pname.toLowerCase()}:${oct}`
+}
+
+function applyAccidentalPromotion(noteAttrsRaw: string, childSubtrees: SubtreeResult[], accidentalCtx: AccidentalContext | null): { attrsRaw: string; childHtmls: string[] } {
+    const childHtmls = childSubtrees.map((subtree) => subtree.html)
+    if (!accidentalCtx) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    const pitchKey = getPitchKey(noteAttrsRaw)
+    if (!pitchKey) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    const attrWritten = getAttr(noteAttrsRaw, "accid")
+    let childWritten: string | null = null
+    let childGesIndex = -1
+    let childGesValue: string | null = null
+
+    for (let i = 0; i < childSubtrees.length; i++) {
+        const first = childSubtrees[i].slice[0]
+        if (!first || (first.kind !== "open" && first.kind !== "self") || first.name !== "accid") continue
+        const accidAttr = getAttr(first.attrsRaw, "accid")
+        if (accidAttr) {
+            childWritten = accidAttr
+            break
+        }
+        const gesAttr = getAttr(first.attrsRaw, "accid.ges")
+        if (gesAttr && childGesIndex === -1) {
+            childGesIndex = i
+            childGesValue = gesAttr
+        }
+    }
+
+    const written = attrWritten || childWritten
+    if (written) {
+        accidentalCtx.resolvedOnKept.add(`${pitchKey}:${written}`)
+        return { attrsRaw: noteAttrsRaw, childHtmls }
+    }
+
+    const removedForPitch = accidentalCtx.removedWritten.get(pitchKey)
+    if (!removedForPitch || !removedForPitch.size) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    const attrGes = getAttr(noteAttrsRaw, "accid.ges")
+    const gesValue = attrGes || childGesValue
+    if (!gesValue || !removedForPitch.has(gesValue)) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    const resolvedKey = `${pitchKey}:${gesValue}`
+    if (accidentalCtx.resolvedOnKept.has(resolvedKey)) return { attrsRaw: noteAttrsRaw, childHtmls }
+
+    accidentalCtx.resolvedOnKept.add(resolvedKey)
+    if (childGesIndex !== -1 && !attrGes) {
+        const targetSubtree = childSubtrees[childGesIndex]
+        const first = targetSubtree.slice[0]
+        if (first && (first.kind === "open" || first.kind === "self")) {
+            const updatedTag = formatTag(first.kind, first.name, setAttr(first.attrsRaw, "accid", gesValue))
+            childHtmls[childGesIndex] =
+                updatedTag +
+                targetSubtree.slice
+                    .slice(1)
+                    .map((token) => token.raw)
+                    .join("")
+        }
+        return { attrsRaw: noteAttrsRaw, childHtmls }
+    }
+
+    return { attrsRaw: setAttr(noteAttrsRaw, "accid", gesValue), childHtmls }
+}
+
+function collectRemovedLayerAccidentals(layerTokens: XmlToken[], target: Map<string, Set<string>>): void {
+    for (let index = 0; index < layerTokens.length; index++) {
+        const token = layerTokens[index]
+        if ((token.kind !== "open" && token.kind !== "self") || token.name !== "note") continue
+
+        const pitchKey = getPitchKey(token.attrsRaw)
+        if (!pitchKey) continue
+
+        let written = getAttr(token.attrsRaw, "accid")
+        if (!written && token.kind === "open") {
+            let depth = 1
+            for (let scan = index + 1; scan < layerTokens.length && depth > 0; scan++) {
+                const child = layerTokens[scan]
+                if (child.kind === "open") {
+                    if (depth === 1 && child.name === "accid") {
+                        written = getAttr(child.attrsRaw, "accid")
+                        if (written) break
+                    }
+                    depth++
+                } else if (child.kind === "self") {
+                    if (depth === 1 && child.name === "accid") {
+                        written = getAttr(child.attrsRaw, "accid")
+                        if (written) break
+                    }
+                } else if (child.kind === "close") {
+                    depth--
+                }
+            }
+        }
+
+        if (written) {
+            if (!target.has(pitchKey)) target.set(pitchKey, new Set())
+            target.get(pitchKey)!.add(written)
+        }
+    }
+}
+
+function extractRemovedLayerClefs(layerTokens: XmlToken[], removedIds: Set<string>): { sameBarClef: RescuedClef | null; nextBarClef: RescuedClef | null; rescuedIds: Set<string> } {
+    let sameBarClef: RescuedClef | null = null
+    let nextBarClef: RescuedClef | null = null
+    let sawPrecedingElement = false
+
+    let index = 1
+    while (index < layerTokens.length - 1) {
+        const token = layerTokens[index]
+        if (token.kind === "other") {
+            index++
+            continue
+        }
+        if (token.kind === "close") {
+            index++
+            continue
+        }
+
+        const subtree = serializeSubtree(layerTokens, index)
+        if (token.name === "clef") {
+            const clef: RescuedClef = { html: subtree.html, ids: extractElementIds(subtree.slice) }
+            if (!sawPrecedingElement) {
+                if (sameBarClef) {
+                    for (const oldId of sameBarClef.ids) removedIds.add(oldId)
+                }
+                sameBarClef = clef
+            } else {
+                if (nextBarClef) {
+                    for (const oldId of nextBarClef.ids) removedIds.add(oldId)
+                }
+                nextBarClef = clef
+            }
+        } else {
+            sawPrecedingElement = true
+        }
+        index = subtree.nextIndex
+    }
+
+    const rescuedIds = new Set<string>()
+    if (sameBarClef) {
+        for (const id of sameBarClef.ids) rescuedIds.add(id)
+    }
+    if (nextBarClef) {
+        for (const id of nextBarClef.ids) rescuedIds.add(id)
+    }
+
+    return { sameBarClef, nextBarClef, rescuedIds }
+}
+
+function layerStartsWithClef(layerTokens: XmlToken[]): boolean {
+    for (let i = 1; i < layerTokens.length - 1; i++) {
+        const token = layerTokens[i]
+        if (token.kind === "other") continue
+        return (token.kind === "open" || token.kind === "self") && token.name === "clef"
+    }
+    return false
+}
+
+function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+    const rawChordVerses: SubtreeResult[] = []
     const chordOtherChildren: string[] = []
     const notes: ChordNoteEntry[] = []
 
@@ -291,11 +582,7 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
 
         if (token.name === "verse") {
             const subtree = serializeSubtree(innerTokens, index)
-            if (shouldKeepVerse(getAttr(token.attrsRaw, "n"))) {
-                chordVerses.push(subtree.html)
-            } else {
-                collectElementIds(subtree.slice, removedIds)
-            }
+            rawChordVerses.push(subtree)
             index = subtree.nextIndex
             continue
         }
@@ -303,8 +590,9 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
         if (token.name === "note") {
             const noteEntry: ChordNoteEntry = {
                 attrsRaw: token.attrsRaw,
-                verses: [],
-                otherChildren: [],
+                rawVerses: [],
+                otherSubtrees: [],
+                otherRaw: [],
                 removedIds: []
             }
             const noteId = getAttr(token.attrsRaw, "xml:id")
@@ -326,13 +614,9 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
                 if (child.kind === "open" || child.kind === "self") {
                     const childSubtree = serializeSubtree(innerTokens, innerIndex)
                     if (child.name === "verse") {
-                        if (shouldKeepVerse(getAttr(child.attrsRaw, "n"))) {
-                            noteEntry.verses.push(childSubtree.html)
-                        } else {
-                            collectElementIds(childSubtree.slice, removedIds)
-                        }
+                        noteEntry.rawVerses.push(childSubtree)
                     } else {
-                        noteEntry.otherChildren.push(childSubtree.html)
+                        noteEntry.otherSubtrees.push(childSubtree)
                         for (const sub of childSubtree.slice) {
                             if (sub.kind === "open" || sub.kind === "self") {
                                 const subId = getAttr(sub.attrsRaw, "xml:id")
@@ -344,7 +628,7 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
                     continue
                 }
                 if (child.kind === "other" && child.raw.trim()) {
-                    noteEntry.otherChildren.push(child.raw)
+                    noteEntry.otherRaw.push(child.raw)
                 }
                 innerIndex++
             }
@@ -362,6 +646,7 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
     const chordId = getAttr(chordAttrsRaw, "xml:id")
     if (!notes.length) {
         if (chordId) removedIds.add(chordId)
+        for (const verse of rawChordVerses) collectElementIds(verse.slice, removedIds)
         return ""
     }
 
@@ -376,12 +661,20 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
     }
 
     const winner = notes[bestIndex]
-    const fallbackVerses: string[] = []
+    const usePrimaryVerses = rawChordVerses.length > 0 || winner.rawVerses.length > 0
+    const fallbackRawVerses: SubtreeResult[] = []
     for (let i = 0; i < notes.length; i++) {
         if (i === bestIndex) continue
         for (const droppedId of notes[i].removedIds) removedIds.add(droppedId)
-        if (notes[i].verses.length) fallbackVerses.push(...notes[i].verses)
+        if (usePrimaryVerses) {
+            for (const verse of notes[i].rawVerses) collectElementIds(verse.slice, removedIds)
+        } else if (notes[i].rawVerses.length) {
+            fallbackRawVerses.push(...notes[i].rawVerses)
+        }
     }
+
+    const sourceVerses = usePrimaryVerses ? [...rawChordVerses, ...winner.rawVerses] : fallbackRawVerses
+    const keptVerses = filterVerseSubtrees(sourceVerses, verseCtx, removedIds)
 
     let mergedAttrs = winner.attrsRaw
     const winnerId = getAttr(mergedAttrs, "xml:id")
@@ -399,24 +692,393 @@ function collapseChord(chordAttrsRaw: string, innerTokens: XmlToken[], stripStem
         if (chordValue !== null) mergedAttrs = setAttr(mergedAttrs, attrName, chordValue)
     }
 
+    const promoted = applyAccidentalPromotion(mergedAttrs, winner.otherSubtrees, accidentalCtx)
+    mergedAttrs = promoted.attrsRaw
+
     if (stripStem) {
         mergedAttrs = removeAttr(mergedAttrs, "stem.dir")
     }
 
-    const keptVerses = chordVerses.length || winner.verses.length ? [...chordVerses, ...winner.verses] : fallbackVerses
-    const children = [...winner.otherChildren, ...chordOtherChildren, ...keptVerses].join("")
+    const children = [...promoted.childHtmls, ...winner.otherRaw, ...chordOtherChildren, ...keptVerses].join("")
     if (!children) return formatTag("self", "note", mergedAttrs)
     return `${formatTag("open", "note", mergedAttrs)}${children}</note>`
 }
 
-function stripEmptyStaffGroups(mei: string): string {
-    let result = mei
-    let previous = ""
-    while (result !== previous) {
-        previous = result
-        result = result.replace(/<staffGrp(?:\s[^>]*)?\/>|<staffGrp(?:\s[^>]*)?>\s*<\/staffGrp>/g, "")
+function emitNoteToken(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
+    const token = tokens[startIndex]
+    if (token.kind !== "open" && token.kind !== "self") {
+        return { html: token.raw, nextIndex: startIndex + 1 }
     }
-    return result
+
+    if (token.kind === "self") {
+        const selfPromoted = applyAccidentalPromotion(token.attrsRaw, [], accidentalCtx)
+        let selfAttrsRaw = selfPromoted.attrsRaw
+        let modified = selfAttrsRaw !== token.attrsRaw
+        if (stripStem && getAttr(selfAttrsRaw, "stem.dir") !== null) {
+            selfAttrsRaw = removeAttr(selfAttrsRaw, "stem.dir")
+            modified = true
+        }
+        return { html: modified ? formatTag("self", "note", selfAttrsRaw) : token.raw, nextIndex: startIndex + 1 }
+    }
+
+    const subtree = serializeSubtree(tokens, startIndex)
+    const directVerses: SubtreeResult[] = []
+    const otherSubtrees: SubtreeResult[] = []
+    const parts: ({ kind: "otherSubtree"; index: number } | { kind: "raw"; text: string } | { kind: "verses" })[] = []
+    let insertedVerseSlot = false
+
+    let cursor = 1
+    while (cursor < subtree.slice.length - 1) {
+        const child = subtree.slice[cursor]
+        if (child.kind === "other") {
+            parts.push({ kind: "raw", text: child.raw })
+            cursor++
+            continue
+        }
+        if (child.kind === "close") {
+            parts.push({ kind: "raw", text: child.raw })
+            cursor++
+            continue
+        }
+
+        const childSubtree = serializeSubtree(subtree.slice, cursor)
+        if (child.name === "verse") {
+            if (!insertedVerseSlot) {
+                parts.push({ kind: "verses" })
+                insertedVerseSlot = true
+            }
+            directVerses.push(childSubtree)
+        } else {
+            const subIdx = otherSubtrees.length
+            otherSubtrees.push(childSubtree)
+            parts.push({ kind: "otherSubtree", index: subIdx })
+        }
+        cursor = childSubtree.nextIndex
+    }
+
+    const promoted = applyAccidentalPromotion(token.attrsRaw, otherSubtrees, accidentalCtx)
+    let attrsRaw = promoted.attrsRaw
+    if (stripStem && getAttr(attrsRaw, "stem.dir") !== null) {
+        attrsRaw = removeAttr(attrsRaw, "stem.dir")
+    }
+
+    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, removedIds)
+    const innerHtml = parts
+        .map((part) => {
+            if (part.kind === "raw") return part.text
+            if (part.kind === "otherSubtree") return promoted.childHtmls[part.index]
+            return keptVerses.join("")
+        })
+        .join("")
+
+    const openTag = attrsRaw === token.attrsRaw ? token.raw : formatTag("open", "note", attrsRaw)
+    const closeToken = subtree.slice[subtree.slice.length - 1]
+    const closeTag = closeToken.kind === "close" ? closeToken.raw : "</note>"
+    return { html: `${openTag}${innerHtml}${closeTag}`, nextIndex: subtree.nextIndex }
+}
+
+function emitNonCollapsedChord(tokens: XmlToken[], startIndex: number, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, removedIds: Set<string>): { html: string; nextIndex: number } {
+    const token = tokens[startIndex]
+    if (token.kind !== "open") {
+        let selfAttrsRaw = token.kind === "self" ? token.attrsRaw : ""
+        if (token.kind === "self" && stripStem && getAttr(selfAttrsRaw, "stem.dir") !== null) {
+            selfAttrsRaw = removeAttr(selfAttrsRaw, "stem.dir")
+            return { html: formatTag("self", "chord", selfAttrsRaw), nextIndex: startIndex + 1 }
+        }
+        return { html: token.raw, nextIndex: startIndex + 1 }
+    }
+
+    const subtree = serializeSubtree(tokens, startIndex)
+    const directVerses: SubtreeResult[] = []
+    const parts: ({ kind: "raw"; text: string } | { kind: "verses" })[] = []
+    let insertedVerseSlot = false
+
+    let cursor = 1
+    while (cursor < subtree.slice.length - 1) {
+        const child = subtree.slice[cursor]
+        if (child.kind === "other" || child.kind === "close") {
+            parts.push({ kind: "raw", text: child.raw })
+            cursor++
+            continue
+        }
+        if (child.name === "verse") {
+            if (!insertedVerseSlot) {
+                parts.push({ kind: "verses" })
+                insertedVerseSlot = true
+            }
+            const verseSubtree = serializeSubtree(subtree.slice, cursor)
+            directVerses.push(verseSubtree)
+            cursor = verseSubtree.nextIndex
+            continue
+        }
+        if (child.name === "note") {
+            const emittedNote = emitNoteToken(subtree.slice, cursor, stripStem, verseCtx, accidentalCtx, removedIds)
+            parts.push({ kind: "raw", text: emittedNote.html })
+            cursor = emittedNote.nextIndex
+            continue
+        }
+
+        const otherSubtree = serializeSubtree(subtree.slice, cursor)
+        parts.push({ kind: "raw", text: otherSubtree.html })
+        cursor = otherSubtree.nextIndex
+    }
+
+    let attrsRaw = token.attrsRaw
+    if (stripStem && getAttr(attrsRaw, "stem.dir") !== null) {
+        attrsRaw = removeAttr(attrsRaw, "stem.dir")
+    }
+    const keptVerses = filterVerseSubtrees(directVerses, verseCtx, removedIds)
+    const innerHtml = parts.map((part) => (part.kind === "verses" ? keptVerses.join("") : part.text)).join("")
+    const openTag = attrsRaw === token.attrsRaw ? token.raw : formatTag("open", "chord", attrsRaw)
+    const closeToken = subtree.slice[subtree.slice.length - 1]
+    const closeTag = closeToken.kind === "close" ? closeToken.raw : "</chord>"
+    return { html: `${openTag}${innerHtml}${closeTag}`, nextIndex: subtree.nextIndex }
+}
+
+function emitKeptLayer(layerTokens: XmlToken[], staffN: string, firstStaffN: string, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, accidentalCtx: AccidentalContext | null, clefToPrepend: RescuedClef | null, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+    const first = layerTokens[0]
+    if (!first || first.kind === "self") return first ? first.raw : ""
+
+    const output: string[] = [first.raw]
+    if (clefToPrepend) {
+        if (layerStartsWithClef(layerTokens)) {
+            for (const id of clefToPrepend.ids) removedIds.add(id)
+        } else {
+            output.push(clefToPrepend.html)
+        }
+    }
+
+    let index = 1
+    while (index < layerTokens.length - 1) {
+        const token = layerTokens[index]
+        if (token.kind === "other" || token.kind === "close") {
+            output.push(token.raw)
+            index++
+            continue
+        }
+
+        if (token.name === "chord") {
+            if (reduceChords && staffN === firstStaffN && token.kind === "open") {
+                const subtree = serializeSubtree(layerTokens, index)
+                const innerTokens = subtree.slice.slice(1, -1)
+                output.push(collapseChord(token.attrsRaw, innerTokens, stripStem, verseCtx, accidentalCtx, removedIds, remappedIds))
+                index = subtree.nextIndex
+                continue
+            }
+            const emittedChord = emitNonCollapsedChord(layerTokens, index, stripStem, verseCtx, accidentalCtx, removedIds)
+            output.push(emittedChord.html)
+            index = emittedChord.nextIndex
+            continue
+        }
+
+        if (token.name === "note") {
+            const emittedNote = emitNoteToken(layerTokens, index, stripStem, verseCtx, accidentalCtx, removedIds)
+            output.push(emittedNote.html)
+            index = emittedNote.nextIndex
+            continue
+        }
+
+        let attrsRaw = token.attrsRaw
+        let modified = false
+        if (stripStem && getAttr(attrsRaw, "stem.dir") !== null) {
+            attrsRaw = removeAttr(attrsRaw, "stem.dir")
+            modified = true
+        }
+        output.push(modified ? formatTag(token.kind, token.name, attrsRaw) : token.raw)
+        index++
+    }
+
+    const last = layerTokens[layerTokens.length - 1]
+    if (last) output.push(last.raw)
+    return output.join("")
+}
+
+function processKeptStaff(staffTokens: XmlToken[], staffN: string, firstStaffN: string, filteringParts: boolean, keptLayers: Set<string> | undefined, reduceChords: boolean, stripStem: boolean, verseCtx: VerseFilterContext, pendingClefByStaff: Map<string, RescuedClef>, removedIds: Set<string>, remappedIds: Map<string, string>): string {
+    const first = staffTokens[0]
+    if (!first || first.kind === "self") return first ? first.raw : ""
+
+    interface StaffChild {
+        kind: "layer" | "other"
+        kept: boolean
+        tokens: XmlToken[]
+    }
+
+    const children: StaffChild[] = []
+    let cursor = 1
+    while (cursor < staffTokens.length - 1) {
+        const token = staffTokens[cursor]
+        if (token.kind === "other" || token.kind === "close") {
+            children.push({ kind: "other", kept: true, tokens: [token] })
+            cursor++
+            continue
+        }
+
+        const subtree = serializeSubtree(staffTokens, cursor)
+        if (token.name === "layer") {
+            const layerN = getAttr(token.attrsRaw, "n") || "1"
+            const isKept = !filteringParts || Boolean(keptLayers?.has(layerN))
+            children.push({ kind: "layer", kept: isKept, tokens: subtree.slice })
+        } else {
+            children.push({ kind: "other", kept: true, tokens: subtree.slice })
+        }
+        cursor = subtree.nextIndex
+    }
+
+    const removedWritten = new Map<string, Set<string>>()
+    let sameBarClef: RescuedClef | null = null
+    let nextBarClef: RescuedClef | null = null
+
+    for (const child of children) {
+        if (child.kind !== "layer" || child.kept) continue
+        collectRemovedLayerAccidentals(child.tokens, removedWritten)
+        const extracted = extractRemovedLayerClefs(child.tokens, removedIds)
+        if (extracted.sameBarClef) {
+            if (sameBarClef) {
+                for (const id of sameBarClef.ids) removedIds.add(id)
+            }
+            sameBarClef = extracted.sameBarClef
+        }
+        if (extracted.nextBarClef) {
+            if (nextBarClef) {
+                for (const id of nextBarClef.ids) removedIds.add(id)
+            }
+            nextBarClef = extracted.nextBarClef
+        }
+        for (const token of child.tokens) {
+            if (token.kind === "open" || token.kind === "self") {
+                const xmlId = getAttr(token.attrsRaw, "xml:id")
+                if (xmlId && !extracted.rescuedIds.has(xmlId)) removedIds.add(xmlId)
+            }
+        }
+    }
+
+    const inheritedClef = pendingClefByStaff.get(staffN) ?? null
+    pendingClefByStaff.delete(staffN)
+
+    let clefToPrepend: RescuedClef | null = inheritedClef
+    if (sameBarClef) {
+        if (inheritedClef) {
+            for (const id of inheritedClef.ids) removedIds.add(id)
+        }
+        clefToPrepend = sameBarClef
+    }
+
+    if (nextBarClef) {
+        pendingClefByStaff.set(staffN, nextBarClef)
+    }
+
+    const accidentalCtx: AccidentalContext | null = removedWritten.size > 0 ? { removedWritten, resolvedOnKept: new Set() } : null
+    const output: string[] = [first.raw]
+    let appliedClef = false
+
+    for (const child of children) {
+        if (!child.kept) continue
+        if (child.kind === "layer") {
+            const prepend = !appliedClef ? clefToPrepend : null
+            appliedClef = true
+            output.push(emitKeptLayer(child.tokens, staffN, firstStaffN, reduceChords, stripStem, verseCtx, accidentalCtx, prepend, removedIds, remappedIds))
+        } else {
+            output.push(child.tokens.map((token) => token.raw).join(""))
+        }
+    }
+
+    if (!appliedClef && clefToPrepend) {
+        // No kept layer appeared in this bar for this staff: carry the clef forward to the next bar
+        if (!nextBarClef) {
+            pendingClefByStaff.set(staffN, clefToPrepend)
+        } else {
+            for (const id of clefToPrepend.ids) removedIds.add(id)
+        }
+    }
+
+    const last = staffTokens[staffTokens.length - 1]
+    if (last) output.push(last.raw)
+    return output.join("")
+}
+
+function cleanStaffGroupTokens(tokens: XmlToken[], startIndex: number, endIndex: number, removedIds: Set<string>): { html: string; staffDefCount: number } {
+    const openToken = tokens[startIndex]
+    if (openToken.kind === "self") {
+        const xmlId = getAttr(openToken.attrsRaw, "xml:id")
+        if (xmlId) removedIds.add(xmlId)
+        return { html: "", staffDefCount: 0 }
+    }
+
+    const parts: ({ kind: "raw"; text: string } | { kind: "grpSym"; slice: XmlToken[]; html: string })[] = []
+    let staffDefCount = 0
+
+    let index = startIndex + 1
+    while (index < endIndex) {
+        const token = tokens[index]
+        if (token.kind === "other" || token.kind === "close") {
+            parts.push({ kind: "raw", text: token.raw })
+            index++
+            continue
+        }
+
+        const subtree = serializeSubtree(tokens, index)
+        if (token.name === "staffGrp") {
+            const nested = cleanStaffGroupTokens(tokens, index, subtree.nextIndex - (token.kind === "open" ? 1 : 0), removedIds)
+            staffDefCount += nested.staffDefCount
+            if (nested.html) parts.push({ kind: "raw", text: nested.html })
+        } else if (token.name === "staffDef") {
+            staffDefCount++
+            parts.push({ kind: "raw", text: subtree.html })
+        } else if (token.name === "grpSym") {
+            parts.push({ kind: "grpSym", slice: subtree.slice, html: subtree.html })
+        } else {
+            parts.push({ kind: "raw", text: subtree.html })
+        }
+        index = subtree.nextIndex
+    }
+
+    if (staffDefCount === 0) {
+        collectElementIds(tokens.slice(startIndex, endIndex + 1), removedIds)
+        return { html: "", staffDefCount: 0 }
+    }
+
+    let openTag = openToken.raw
+    const singleStaff = staffDefCount === 1
+    if (singleStaff && openToken.kind === "open" && getAttr(openToken.attrsRaw, "symbol") !== null) {
+        openTag = formatTag("open", "staffGrp", removeAttr(openToken.attrsRaw, "symbol"))
+    }
+
+    const innerHtml = parts
+        .map((part) => {
+            if (part.kind === "raw") return part.text
+            if (singleStaff) {
+                collectElementIds(part.slice, removedIds)
+                return ""
+            }
+            return part.html
+        })
+        .join("")
+
+    const closeToken = tokens[endIndex]
+    const closeTag = closeToken && closeToken.kind === "close" ? closeToken.raw : "</staffGrp>"
+    return { html: `${openTag}${innerHtml}${closeTag}`, staffDefCount }
+}
+
+function cleanStaffGroups(mei: string, removedIds: Set<string>): string {
+    const tokens = scanXml(mei)
+    const output: string[] = []
+    let index = 0
+
+    while (index < tokens.length) {
+        const token = tokens[index]
+        if ((token.kind === "open" || token.kind === "self") && token.name === "staffGrp") {
+            const subtree = serializeSubtree(tokens, index)
+            const endIndex = token.kind === "open" ? subtree.nextIndex - 1 : index
+            const cleaned = cleanStaffGroupTokens(tokens, index, endIndex, removedIds)
+            if (cleaned.html) output.push(cleaned.html)
+            index = subtree.nextIndex
+            continue
+        }
+        output.push(token.raw)
+        index++
+    }
+
+    return output.join("")
 }
 
 function rewriteRef(rawRef: string, removedIds: Set<string>, remappedIds: Map<string, string>): { value: string; removed: boolean } {
@@ -534,12 +1196,20 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
 
     let filteringVerses = false
     let keptVerses: Set<number> | null = null
+    const verseRenumberMap = new Map<number, number>()
     if (options.verses === "none") {
         filteringVerses = summary.verses.length > 0
         keptVerses = new Set()
     } else if (Array.isArray(options.verses)) {
-        keptVerses = new Set(options.verses)
-        filteringVerses = summary.verses.some((verse) => !keptVerses!.has(verse))
+        const chosenSet = new Set(options.verses)
+        const matchingVerses = summary.verses.filter((verse) => chosenSet.has(verse))
+        if (matchingVerses.length > 0) {
+            keptVerses = new Set(matchingVerses)
+            matchingVerses.forEach((verseNumber, idx) => {
+                verseRenumberMap.set(verseNumber, idx + 1)
+            })
+            filteringVerses = matchingVerses.length < summary.verses.length || matchingVerses.some((verseNumber, idx) => verseNumber !== idx + 1)
+        }
     }
 
     if (!filteringParts && !filteringVerses && !reduceChords) {
@@ -565,26 +1235,24 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
         }
     }
 
-    const singleStaffLeft = filteringParts && keptStaves.size === 1
     const firstStaffN = summary.staves[0]?.n ?? ""
     const shouldStripStemsOnStaff = (staffN: string | null): boolean => {
         if (!staffN || (!filteringParts && !reduceChords)) return false
         return (keptLayersByStaff.get(staffN)?.size ?? 0) === 1
     }
-    const shouldKeepVerse = (verseAttr: string | null): boolean => {
-        if (!filteringVerses || keptVerses === null) return true
-        const verseNumber = parseVerseNumber(verseAttr)
-        if (verseNumber === null) return keptVerses.size > 0
-        return keptVerses.has(verseNumber)
+
+    const verseCtx: VerseFilterContext = {
+        filteringVerses,
+        keptVerses,
+        verseRenumberMap
     }
 
     const tokens = scanXml(mei)
     const output: string[] = []
     const removedIds = new Set<string>()
     const remappedIds = new Map<string, string>()
+    const pendingClefByStaff = new Map<string, RescuedClef>()
 
-    const staffStack: string[] = []
-    const layerStack: string[] = []
     let skipDepth = 0
 
     for (let index = 0; index < tokens.length; index++) {
@@ -601,19 +1269,10 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
             continue
         }
 
-        if (token.kind === "other") {
+        if (token.kind === "other" || token.kind === "close") {
             output.push(token.raw)
             continue
         }
-
-        if (token.kind === "close") {
-            if (token.name === "staff" && staffStack.length > 0) staffStack.pop()
-            else if (token.name === "layer" && layerStack.length > 0) layerStack.pop()
-            output.push(token.raw)
-            continue
-        }
-
-        const currentStaff = staffStack[staffStack.length - 1] ?? null
 
         if (filteringParts && token.name === "staffDef") {
             const staffN = getAttr(token.attrsRaw, "n")
@@ -633,63 +1292,18 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
                 if (token.kind === "open") skipDepth = 1
                 continue
             }
-            if (token.kind === "open" && staffN) staffStack.push(staffN)
-            output.push(token.raw)
-            continue
-        }
-
-        if (token.name === "layer" && currentStaff !== null) {
-            const layerN = getAttr(token.attrsRaw, "n") || "1"
-            if (filteringParts && !keptLayersByStaff.get(currentStaff)?.has(layerN)) {
-                const xmlId = getAttr(token.attrsRaw, "xml:id")
-                if (xmlId) removedIds.add(xmlId)
-                if (token.kind === "open") skipDepth = 1
+            if (token.kind === "open" && staffN) {
+                const subtree = serializeSubtree(tokens, index)
+                output.push(processKeptStaff(subtree.slice, staffN, firstStaffN, filteringParts, keptLayersByStaff.get(staffN), reduceChords, shouldStripStemsOnStaff(staffN), verseCtx, pendingClefByStaff, removedIds, remappedIds))
+                index = subtree.nextIndex - 1
                 continue
             }
-            if (token.kind === "open") layerStack.push(layerN)
             output.push(token.raw)
-            continue
-        }
-
-        if (filteringVerses && token.name === "verse") {
-            if (!shouldKeepVerse(getAttr(token.attrsRaw, "n"))) {
-                const xmlId = getAttr(token.attrsRaw, "xml:id")
-                if (xmlId) removedIds.add(xmlId)
-                if (token.kind === "open") skipDepth = 1
-                continue
-            }
-        }
-
-        if (singleStaffLeft && token.name === "grpSym") {
-            const xmlId = getAttr(token.attrsRaw, "xml:id")
-            if (xmlId) removedIds.add(xmlId)
-            if (token.kind === "open") skipDepth = 1
-            continue
-        }
-
-        if (reduceChords && token.name === "chord" && token.kind === "open" && currentStaff === firstStaffN && layerStack.length > 0) {
-            const innerTokens: XmlToken[] = []
-            let depth = 1
-            let scanIndex = index + 1
-            while (scanIndex < tokens.length && depth > 0) {
-                const nextToken = tokens[scanIndex]
-                if (nextToken.kind === "open") depth++
-                else if (nextToken.kind === "close") depth--
-                if (depth > 0) innerTokens.push(nextToken)
-                scanIndex++
-            }
-            output.push(collapseChord(token.attrsRaw, innerTokens, shouldStripStemsOnStaff(currentStaff), shouldKeepVerse, removedIds, remappedIds))
-            index = scanIndex - 1
             continue
         }
 
         let attrsRaw = token.attrsRaw
         let modified = false
-
-        if (singleStaffLeft && token.name === "staffGrp" && getAttr(attrsRaw, "symbol") !== null) {
-            attrsRaw = removeAttr(attrsRaw, "symbol")
-            modified = true
-        }
 
         if (filteringParts && token.name !== "staff" && token.name !== "staffDef") {
             const staffAttr = getAttr(attrsRaw, "staff")
@@ -709,15 +1323,14 @@ export function filterMei(mei: string, options: FilterMeiOptions): string {
             }
         }
 
-        if (shouldStripStemsOnStaff(currentStaff) && getAttr(attrsRaw, "stem.dir") !== null) {
-            attrsRaw = removeAttr(attrsRaw, "stem.dir")
-            modified = true
-        }
-
         output.push(modified ? formatTag(token.kind, token.name, attrsRaw) : token.raw)
     }
 
-    let result = filteringParts ? stripEmptyStaffGroups(output.join("")) : output.join("")
+    for (const leftoverClef of pendingClefByStaff.values()) {
+        for (const id of leftoverClef.ids) removedIds.add(id)
+    }
+
+    let result = filteringParts ? cleanStaffGroups(output.join(""), removedIds) : output.join("")
     if (removedIds.size > 0 || remappedIds.size > 0) {
         result = cleanControlReferences(result, removedIds, remappedIds)
     }

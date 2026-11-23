@@ -12,7 +12,7 @@
     import type { SheetMusicPartsPreset } from "./sheetMusic/helpers"
     import { filterMei, summarizeMei } from "./sheetMusic/meiParts"
     import type { MeiSummary } from "./sheetMusic/meiParts"
-    import { parseVersesFilter, resolvePartsSelection } from "./sheetMusic/parts"
+    import { resolvePartsSelection, resolveVersesSelection } from "./sheetMusic/parts"
 
     export let item: Item
     export let edit = false
@@ -69,7 +69,7 @@
         }
 
         const resolvedParts = resolvePartsSelection(partsPreset, customParts, cachedSummary)
-        const resolvedVerses = parseVersesFilter(versesRaw)
+        const resolvedVerses = resolveVersesSelection(versesRaw, cachedSummary.verses)
         const result = filterMei(rawMei, {
             parts: resolvedParts.parts,
             verses: resolvedVerses,

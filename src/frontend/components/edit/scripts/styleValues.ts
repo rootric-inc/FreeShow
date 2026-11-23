@@ -61,6 +61,8 @@ export function getStyleLeafRoots(inputs: readonly StyleInput[]): Set<string> {
     return roots
 }
 
+export const EXTRA_STYLE_LEAVES = ["cropping.type", "sheet_music.customParts"] as const
+
 export function withExtraStyleLeaves(inputs: readonly StyleInput[], extraIds: readonly string[]): StyleInput[] {
     const result = [...inputs]
     const leafRoots = getStyleLeafRoots(inputs)

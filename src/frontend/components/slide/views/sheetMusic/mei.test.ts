@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { countMeasures, extractTitle, findFittingLayout, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, stripInitialMeter, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { countMeasures, extractTitle, findFittingLayout, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -40,13 +40,36 @@ describe("mei pure helpers", () => {
         expect(insertSlicePageBreaks(mei, 1, 4)).toBe('<mei><section><measure n="0"><staff/></measure><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>')
     })
 
-    it("strips meter attributes and meterSig only from the initial scoreDef", () => {
-        const mei = '<mei><scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><clef shape="G" line="2"/><meterSig count="4" unit="4" visible="false"/></staffDef></staffGrp></scoreDef><section><scoreDef meter.count="3" meter.unit="4"><staffGrp><staffDef n="1"><meterSig count="3" unit="4"/></staffDef></staffGrp></scoreDef></section></mei>'
-        const stripped = stripInitialMeter(mei)
+    it("hides meter attributes and meterSig only on the initial scoreDef while keeping the meter", () => {
+        const mei = '<mei><scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common"><staffGrp><staffDef n="1" meter.count="4" meter.unit="4"><clef shape="G" line="2"/><meterSig count="4" unit="4"/></staffDef></staffGrp></scoreDef><section><scoreDef meter.count="3" meter.unit="4"><staffGrp><staffDef n="1"><meterSig count="3" unit="4"/></staffDef></staffGrp></scoreDef></section></mei>'
+        const hidden = hideInitialMeter(mei)
 
-        expect(stripped).toContain('<scoreDef keysig="2f"><staffGrp><staffDef n="1"><clef shape="G" line="2"/></staffDef></staffGrp></scoreDef>')
-        expect(stripped).toContain('<scoreDef meter.count="3" meter.unit="4">')
-        expect(stripped).toContain('<meterSig count="3" unit="4"/>')
+        expect(hidden).toContain('<scoreDef keysig="2f" meter.count="4" meter.unit="4" meter.sym="common" meter.visible="false">')
+        expect(hidden).toContain('<staffDef n="1" meter.count="4" meter.unit="4" meter.visible="false">')
+        expect(hidden).toContain('<meterSig count="4" unit="4" visible="false"/>')
+        expect(hidden).toContain('<scoreDef meter.count="3" meter.unit="4">')
+        expect(hidden).toContain('<meterSig count="3" unit="4"/>')
+    })
+
+    it("detects when the time signature changes right before a target measure", () => {
+        const mei = '<mei><scoreDef><staffGrp><staffDef n="1"><meterSig count="4" unit="4"/></staffDef></staffGrp></scoreDef><section>' + '<measure n="1"/><measure n="2"/>' + '<scoreDef><keySig sig="2s"/></scoreDef><measure n="3"/>' + '<scoreDef><meterSig count="3" unit="4"/></scoreDef><measure n="4"/>' + '<measure n="5"/>' + '<scoreDef meter.count="6" meter.unit="8"/><measure n="6"/>' + '<scoreDef meter.count="6" meter.unit="8"/><measure n="7"/>' + "</section></mei>"
+
+        expect(hasMeterChangeAtMeasure(mei, 1)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 2)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 3)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 4)).toBe(true)
+        expect(hasMeterChangeAtMeasure(mei, 5)).toBe(false)
+        expect(hasMeterChangeAtMeasure(mei, 6)).toBe(true)
+        expect(hasMeterChangeAtMeasure(mei, 7)).toBe(false)
+    })
+
+    it("hides measure numbers on scoreDef and removes explicit mNum elements", () => {
+        const mei = '<mei><scoreDef keysig="0"><staffGrp><staffDef n="1"/></staffGrp></scoreDef><section><measure n="13"><mNum>13</mNum><staff n="1"/></measure><scoreDef mnum.visible="true"/><measure n="14"><mNum /></measure></section></mei>'
+        const hidden = hideMeasureNumbers(mei)
+
+        expect(hidden).toContain('<scoreDef keysig="0" mnum.visible="false">')
+        expect(hidden).toContain('<scoreDef mnum.visible="false"/>')
+        expect(hidden).not.toContain("<mNum")
     })
 
     it("removes attributes with external urls, CSS escapes or entity backslashes while keeping local urls and plain colors", () => {

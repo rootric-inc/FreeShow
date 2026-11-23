@@ -70,8 +70,91 @@ export function insertSlicePageBreaks(mei, first, last) {
     })
 }
 
-export function stripInitialMeter(mei) {
-    return mei.replace(/<scoreDef\b[^>]*>[\s\S]*?<\/scoreDef>/, (block) => block.replace(/<meterSig(?:\s[^>]*)?\/>|<meterSig(?:\s[^>]*)?>[\s\S]*?<\/meterSig>/g, "").replace(/\s+meter\.(?:count|unit|sym)=(?:"[^"]*"|'[^']*')/g, ""))
+function readTagAttr(attrs, name) {
+    const escaped = name.replace(/\./g, "\\.")
+    const match = new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attrs)
+    if (!match) return null
+    return match[1] !== undefined ? match[1] : match[2]
+}
+
+function setTagAttr(attrs, name, value) {
+    const escaped = name.replace(/\./g, "\\.")
+    const pattern = new RegExp(`((?:^|\\s)${escaped}\\s*=\\s*)(?:"[^"]*"|'[^']*')`)
+    if (pattern.test(attrs)) {
+        return attrs.replace(pattern, `$1"${value}"`)
+    }
+    return `${attrs.replace(/\s+$/, "")} ${name}="${value}"`
+}
+
+function extractMeterSignature(attrs, isElement) {
+    const count = readTagAttr(attrs, isElement ? "count" : "meter.count")
+    const unit = readTagAttr(attrs, isElement ? "unit" : "meter.unit")
+    const sym = readTagAttr(attrs, isElement ? "sym" : "meter.sym")
+    if (count === null && unit === null && sym === null) return null
+    return `${count ?? ""}|${unit ?? ""}|${sym ?? ""}`
+}
+
+export function hasMeterChangeAtMeasure(mei, targetMeasure) {
+    if (typeof mei !== "string" || !Number.isFinite(targetMeasure) || targetMeasure <= 1) return false
+
+    const tagRe = /<(\/?)(scoreDef|staffDef|meterSig|measure)\b([^>]*?)(\/?)>/g
+    let measureIndex = 0
+    let insideMeasure = false
+    let activeMeter = null
+    let meterBeforeTarget = null
+    let meterDeclaredAtTarget = null
+    let match
+
+    while ((match = tagRe.exec(mei)) !== null) {
+        const [, closingSlash, tagName, attrs, selfSlash] = match
+        if (tagName === "measure") {
+            if (closingSlash) {
+                insideMeasure = false
+                if (measureIndex === targetMeasure - 1) meterBeforeTarget = activeMeter
+                continue
+            }
+            measureIndex++
+            if (measureIndex === targetMeasure) {
+                return meterDeclaredAtTarget !== null && meterDeclaredAtTarget !== meterBeforeTarget
+            }
+            if (selfSlash) {
+                insideMeasure = false
+                if (measureIndex === targetMeasure - 1) meterBeforeTarget = activeMeter
+            } else {
+                insideMeasure = true
+            }
+            continue
+        }
+
+        if (closingSlash) continue
+
+        const signature = extractMeterSignature(attrs, tagName === "meterSig")
+        if (signature !== null) {
+            activeMeter = signature
+            if (!insideMeasure && measureIndex === targetMeasure - 1) {
+                meterDeclaredAtTarget = signature
+            }
+        }
+    }
+
+    return false
+}
+
+export function hideInitialMeter(mei) {
+    if (typeof mei !== "string") return mei
+    return mei.replace(/<scoreDef\b[^>]*\/>|<scoreDef\b[^>]*>[\s\S]*?<\/scoreDef>/, (block) =>
+        block
+            .replace(/<(scoreDef|staffDef)\b([^>]*?)(\/?)>/g, (tag, name, attrs, slash) => {
+                if (!/\bmeter\.(?:count|unit|sym)=(?:"[^"]*"|'[^']*')/.test(attrs)) return tag
+                return `<${name}${setTagAttr(attrs, "meter.visible", "false")}${slash}>`
+            })
+            .replace(/<meterSig\b([^>]*?)(\/?)>/g, (_tag, attrs, slash) => `<meterSig${setTagAttr(attrs, "visible", "false")}${slash}>`)
+    )
+}
+
+export function hideMeasureNumbers(mei) {
+    if (typeof mei !== "string") return mei
+    return mei.replace(/<scoreDef\b([^>]*?)(\/?)>/g, (_tag, attrs, slash) => `<scoreDef${setTagAttr(attrs, "mnum.visible", "false")}${slash}>`).replace(/<mNum(?:\s[^>]*)?\/>|<mNum(?:\s[^>]*)?>[\s\S]*?<\/mNum>/g, "")
 }
 
 function hasUnsafeCssReference(raw) {

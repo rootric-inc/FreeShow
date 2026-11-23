@@ -6,6 +6,7 @@ interface BaseInput {
     id: string
     settings?: any
     style?: string
+    disabled?: boolean
 }
 
 type InputString = {

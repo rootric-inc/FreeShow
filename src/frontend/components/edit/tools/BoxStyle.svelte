@@ -12,18 +12,15 @@
     import { getCustomMetadata, getLayoutRef, initializeMetadata } from "../../helpers/show"
     import { _show } from "../../helpers/shows"
     import { getStyles } from "../../helpers/style"
-    import InputRow from "../../input/InputRow.svelte"
-    import MaterialCheckbox from "../../inputs/MaterialCheckbox.svelte"
     import { MAX_FONT_SIZE } from "../scripts/autosize"
     import { parseDottedId, setStyleLeaf } from "../scripts/styleValues"
     import { addFilterString, addStyle, addStyleString, getItemStyleAtPos, getItemText, getLastLineAlign, getLineText, getSelectionRange } from "../scripts/textStyle"
     import { itemBoxes, setBoxInputValue } from "../values/boxes"
     import { VideoPlayer } from "../../media/video/videoPlayer"
-    import { escapeHtml, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicParts } from "../../slide/views/sheetMusic/helpers"
+    import { escapeHtml, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicParts, mergeSheetMusicOwnedFields } from "../../slide/views/sheetMusic/helpers"
     import { summarizeMei } from "../../slide/views/sheetMusic/meiParts"
     import type { MeiSummary } from "../../slide/views/sheetMusic/meiParts"
-    import { getAllPartKeys, getPartNames } from "../../slide/views/sheetMusic/parts"
-    import type { NamedPart } from "../../slide/views/sheetMusic/parts"
+    import { getAllPartKeys, getDisplayedVersesValue, getPartNames, hasPartsOptions, resolveCustomPartsKeys, toggleCustomPartKey } from "../../slide/views/sheetMusic/parts"
     import EditValues from "./EditValues.svelte"
 
     export let id: ItemType
@@ -251,9 +248,21 @@
     $: lineAlignStyle = item?.lines ? getStyles(getLastLineAlign(item, selection)) : getStyles(item?.align)
     $: alignStyle = item?.align ? getStyles(item.align) : {}
 
+    let lastSheetMusicData = ""
+    let sheetMusicSummary: MeiSummary = { staves: [], verses: [], measures: 0, hasTwoLayersPerStaffInEveryBar: false }
+    $: if (id === "sheet_music" && item) {
+        const rawData = getSheetMusicData(item.sheet_music)
+        if (rawData !== lastSheetMusicData) {
+            lastSheetMusicData = rawData
+            sheetMusicSummary = rawData ? summarizeMei(rawData) : { staves: [], verses: [], measures: 0, hasTwoLayersPerStaffInEveryBar: false }
+        }
+    }
+    $: sheetMusicVersesDisplayValue = id === "sheet_music" && item ? getDisplayedVersesValue(item.sheet_music?.verses, sheetMusicSummary.verses) : null
+
     $: customValues = {
         "text-align": lineAlignStyle["text-align"] || "center",
-        "align-items": alignStyle["align-items"] || "center"
+        "align-items": alignStyle["align-items"] || "center",
+        ...(sheetMusicVersesDisplayValue !== null ? { "sheet_music.verses": sheetMusicVersesDisplayValue } : {})
     }
 
     /// SET INPUT VALUES ///
@@ -380,25 +389,18 @@
         setBoxInputValue(box, "default", "chart.holeSize", "hidden", item.chart?.type !== "pie")
         setBoxInputValue(box, "default", "chart.holeSize", "value", item.chart?.holeSize ?? 0)
     }
-    let lastSheetMusicData = ""
-    let sheetMusicSummary: MeiSummary = { staves: [], verses: [], measures: 0 }
-
     $: if (id === "sheet_music" && item) {
         const rawData = getSheetMusicData(item.sheet_music)
-        if (rawData !== lastSheetMusicData) {
-            lastSheetMusicData = rawData
-            sheetMusicSummary = rawData ? summarizeMei(rawData) : { staves: [], verses: [], measures: 0 }
-        }
 
         const rawLabel = getSheetMusicDisplayLabel(item.sheet_music)
         const label = rawLabel ? escapeHtml(rawLabel) : ""
         setBoxInputValue(box, "default", "sheet_music", "values", { name: label || "actions.open_file" })
 
         const hasMusic = Boolean(rawData)
-        const hasMultipleParts = sheetMusicSummary.staves.length > 1 || (sheetMusicSummary.staves[0]?.layers.length ?? 0) > 1
+        const hasPartsChoice = hasPartsOptions(sheetMusicSummary)
         const hasVerses = sheetMusicSummary.verses.length > 0
 
-        setBoxInputValue(box, "default", "sheet_music.parts", "hidden", !hasMusic || !hasMultipleParts)
+        setBoxInputValue(box, "default", "sheet_music.parts", "hidden", !hasMusic || !hasPartsChoice)
         setBoxInputValue(box, "default", "sheet_music.verses", "hidden", !hasMusic || !hasVerses)
 
         const verseOptions = [
@@ -410,20 +412,42 @@
             }))
         ]
         setBoxInputValue(box, "default", "sheet_music.verses", "options", verseOptions)
+
+        const defaultSection = box?.sections?.default
+        if (defaultSection) {
+            const baseInputs = defaultSection.inputs.filter((row) => !row[0]?.id?.startsWith("sheet_music_part_"))
+            const partList = hasMusic ? getPartNames(sheetMusicSummary) : []
+            const showCustomParts = partList.length > 1 && getSheetMusicParts(item.sheet_music) === "custom"
+            if (showCustomParts) {
+                const allKeys = getAllPartKeys(sheetMusicSummary)
+                const selectedKeys = resolveCustomPartsKeys(getSheetMusicCustomParts(item.sheet_music), allKeys)
+                const partRows = partList.map((part) => {
+                    const isChecked = selectedKeys.includes(part.key)
+                    return [
+                        {
+                            type: "checkbox",
+                            id: `sheet_music_part_${part.key.replace(/\./g, "_")}`,
+                            value: isChecked,
+                            values: {
+                                label: translateText(part.labelKey, $dictionary, part.values),
+                                disabled: isChecked && selectedKeys.length <= 1,
+                                partKey: part.key
+                            }
+                        }
+                    ]
+                })
+                defaultSection.inputs = [...baseInputs, ...partRows]
+            } else {
+                defaultSection.inputs = baseInputs
+            }
+        }
         box = box
     }
 
-    $: sheetMusicPartList = id === "sheet_music" && item && getSheetMusicData(item.sheet_music) ? getPartNames(sheetMusicSummary) : ([] as NamedPart[])
-    $: showCustomSheetMusicParts = id === "sheet_music" && !!item && sheetMusicPartList.length > 1 && getSheetMusicParts(item.sheet_music) === "custom"
-    $: selectedCustomSheetMusicParts = getSheetMusicCustomParts(item?.sheet_music) ?? getAllPartKeys(sheetMusicSummary)
-
     function toggleCustomSheetMusicPart(partKey: string, checked: boolean) {
         const allKeys = getAllPartKeys(sheetMusicSummary)
-        const currentKeys = new Set(getSheetMusicCustomParts(item?.sheet_music) ?? allKeys)
-        if (checked) currentKeys.add(partKey)
-        else currentKeys.delete(partKey)
-
-        const nextKeys = allKeys.filter((key) => currentKeys.has(key))
+        const nextKeys = toggleCustomPartKey(getSheetMusicCustomParts(item?.sheet_music), allKeys, partKey, checked)
+        if (!nextKeys) return
         updateValue({ detail: { id: "sheet_music.customParts", value: nextKeys } })
     }
     $: if (id === "visualizer" && item) {
@@ -443,18 +467,18 @@
 
         let targetId = input.id
         const dotted = typeof input.id === "string" ? parseDottedId(input.id) : null
+        const mergeSheetMusicPopup = input.id === "sheet_music"
         let values: any[] = [value]
 
-        if (dotted) {
-            const [root, leaf] = dotted
-            targetId = root
+        if (dotted || mergeSheetMusicPopup) {
+            if (dotted) targetId = dotted[0]
 
             if (!$activeEdit.id) {
                 let slideId = getLayoutRef()[$activeEdit.slide!]?.id
                 const slideItems = (_show().slides([slideId]).get()[0] as Slide | undefined)?.items
                 if (!slideItems || !allItems.some((i: number) => slideItems[i])) return
 
-                values = allItems.map((i: number) => setStyleLeaf(slideItems[i]?.[root], leaf, input.value))
+                values = allItems.map((i: number) => (dotted ? setStyleLeaf(slideItems[i]?.[dotted[0]], dotted[1], input.value) : mergeSheetMusicOwnedFields(slideItems[i]?.sheet_music, input.value)))
             }
         }
 
@@ -493,7 +517,7 @@
 
         function updateItemValues(a: any) {
             if (!a[$activeEdit.id!]?.items) return a
-            if (dotted && !allItems.some((i: number) => a[$activeEdit.id!].items[i])) return a
+            if ((dotted || mergeSheetMusicPopup) && !allItems.some((i: number) => a[$activeEdit.id!].items[i])) return a
 
             allItems.forEach((i: number) => {
                 if (!a[$activeEdit.id!].items[i]) return
@@ -503,6 +527,10 @@
                 if (dotted) {
                     const [root, leaf] = dotted
                     a[$activeEdit.id!].items[i][root] = setStyleLeaf(a[$activeEdit.id!].items[i][root], leaf, input.value)
+                    return
+                }
+                if (mergeSheetMusicPopup) {
+                    a[$activeEdit.id!].items[i].sheet_music = mergeSheetMusicOwnedFields(a[$activeEdit.id!].items[i].sheet_music, input.value)
                     return
                 }
 
@@ -761,6 +789,11 @@
         input.value = input.values.value
         input.input = input.type
 
+        if (id === "sheet_music" && input.values?.partKey) {
+            toggleCustomSheetMusicPart(input.values.partKey, Boolean(input.value))
+            return
+        }
+
         // unset transparent color
         if (input.key === "text-shadow" && input.value.includes("rgb(0 0 0 / 0)") && input.value.includes("px")) {
             input.value = input.value.replace("rgb(0 0 0 / 0)", "rgb(0 0 0 / 0.4)")
@@ -839,28 +872,4 @@
 
 {#if loaded}
     <EditValues sections={boxSections} {item} {styles} {customValues} {customLocalFonts} type="text" on:change={updateValue2} />
-
-    {#if showCustomSheetMusicParts}
-        <div class="customParts">
-            <div class="customPartsSection">
-                {#each sheetMusicPartList as part (part.key)}
-                    <InputRow>
-                        <MaterialCheckbox label={translateText(part.labelKey, $dictionary, part.values)} checked={selectedCustomSheetMusicParts.includes(part.key)} style="flex: 1;" on:change={(e) => toggleCustomSheetMusicPart(part.key, e.detail)} />
-                    </InputRow>
-                {/each}
-            </div>
-        </div>
-    {/if}
 {/if}
-
-<style>
-    .customParts {
-        padding: 0 5px 8px;
-    }
-
-    .customPartsSection {
-        border: 1px solid var(--primary-lighter);
-        border-radius: 6px;
-        overflow: hidden;
-    }
-</style>

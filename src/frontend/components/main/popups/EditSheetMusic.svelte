@@ -25,8 +25,9 @@
     import type { AbcAnalysisResult, AbcNoteRange } from "../../slide/views/sheetMusic/abcToMei"
     import { convertAndCheckAbc } from "../../slide/views/sheetMusic/abcToMei"
     import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic, sliceMusic } from "../../slide/views/sheetMusic/engine"
-    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicSize, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
-    import { formatMeasureRange, parseMeasureRange } from "../../slide/views/sheetMusic/parts"
+    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicSize, mergeSheetMusicOwnedFields, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
+    import { getMeasureNumbers } from "../../slide/views/sheetMusic/meiParts"
+    import { formatMeasureRange, resolveMeasureRange } from "../../slide/views/sheetMusic/parts"
     import Tabs from "../Tabs.svelte"
     import AbcProblemList from "./sheetMusic/AbcProblemList.svelte"
     import AbcReference from "./sheetMusic/AbcReference.svelte"
@@ -93,9 +94,13 @@
     let openedFileMei = ""
     let openedFileLabel = ""
     let openedFileMeasures = 0
+    let openedFileMeasureNumbers: number[] = []
     let measuresInput = ""
     let measuresInvalid = false
     let lastAppliedRangeKey = ""
+    let loadingFile = false
+
+    $: measuresPlaceholder = openedFileMeasureNumbers.length > 0 ? formatMeasureRange(openedFileMeasureNumbers[0], openedFileMeasureNumbers[openedFileMeasureNumbers.length - 1]) : openedFileMeasures > 1 ? `1-${openedFileMeasures}` : "1"
 
     const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
     let selectedKey = initialHeader.key
@@ -202,12 +207,7 @@
     }
 
     function saveOwnedFields(fields: OwnedSheetMusicFields): void {
-        const nextState: SheetMusicState = { ...current }
-        for (const key of ["data", "abc", "label", "measures"] as const) {
-            const value = fields[key]
-            if (value) nextState[key] = value
-            else delete nextState[key]
-        }
+        const nextState = mergeSheetMusicOwnedFields(current, fields) as SheetMusicState
         current = nextState
         if (!destroyed && onSave) onSave({ ...nextState })
     }
@@ -216,6 +216,7 @@
         openedFileMei = ""
         openedFileLabel = ""
         openedFileMeasures = 0
+        openedFileMeasureNumbers = []
         measuresInput = ""
         measuresInvalid = false
         lastAppliedRangeKey = ""
@@ -295,8 +296,14 @@
         cancelPending()
         requestToken++
         loading = false
+        loadingFile = false
         error = ""
         confirmReplace = false
+
+        if (openedFileMei) {
+            measuresInput = lastAppliedRangeKey
+            measuresInvalid = false
+        }
 
         if (tab === "file") {
             flushPendingSave()
@@ -363,43 +370,48 @@
             return
         }
 
+        loadingFile = true
         runTask(
             async (signal, isLive) => {
-                const source = getExtension(filePath) === "mxl" ? { base64: rawBase64 } : { text: decodeBase64Text(rawBase64) }
-                const loaded = await loadMusic(source, signal)
-                if (!isLive()) return
+                try {
+                    const source = getExtension(filePath) === "mxl" ? { base64: rawBase64 } : { text: decodeBase64Text(rawBase64) }
+                    const loaded = await loadMusic(source, signal)
+                    if (!isLive()) return
 
-                const rendered = await renderMei(loaded.mei, signal)
-                if (!isLive()) return
+                    const rendered = await renderMei(loaded.mei, signal)
+                    if (!isLive()) return
 
-                const fileLabel = loaded.title || removeExtension(getFileName(filePath))
-                openedFileMei = loaded.mei
-                openedFileLabel = fileLabel
-                openedFileMeasures = loaded.measures
-                measuresInput = ""
-                measuresInvalid = false
-                lastAppliedRangeKey = ""
+                    const fileLabel = loaded.title || removeExtension(getFileName(filePath))
+                    openedFileMei = loaded.mei
+                    openedFileLabel = fileLabel
+                    openedFileMeasures = loaded.measures
+                    openedFileMeasureNumbers = getMeasureNumbers(loaded.mei)
+                    measuresInput = ""
+                    measuresInvalid = false
+                    lastAppliedRangeKey = ""
 
-                lastSavedAbc = ""
-                text = ""
-                saveOwnedFields({
-                    data: loaded.mei,
-                    label: fileLabel
-                })
-                previewData = loaded.mei
-                previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
-                truncated = rendered.pages > 1
+                    lastSavedAbc = ""
+                    text = ""
+                    saveOwnedFields({
+                        data: loaded.mei,
+                        label: fileLabel
+                    })
+                    previewData = loaded.mei
+                    previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
+                    truncated = rendered.pages > 1
+                } finally {
+                    if (isLive()) loadingFile = false
+                }
             },
             { fallbackError: "load" }
         )
     }
 
-    function applyMeasureSlice(first: number, last: number, existingToken?: number) {
+    function applyMeasureSlice(first: number, last: number, rangeLabel: string, existingToken?: number) {
         const sourceMei = openedFileMei
         const sourceLabel = openedFileLabel
         if (!sourceMei) return
 
-        const rangeLabel = formatMeasureRange(first, last)
         truncated = false
         runTask(
             async (signal, isLive) => {
@@ -424,8 +436,8 @@
     }
 
     function handleMeasuresInput(value: string, immediate = false) {
+        if (loadingFile || !openedFileMei) return
         measuresInput = typeof value === "string" ? value : ""
-        if (!openedFileMei) return
 
         const trimmed = measuresInput.trim()
         if (!trimmed) {
@@ -446,7 +458,7 @@
             return
         }
 
-        const range = parseMeasureRange(trimmed, openedFileMeasures)
+        const range = resolveMeasureRange(trimmed, openedFileMeasureNumbers)
         if (!range) {
             measuresInvalid = true
             cancelPending()
@@ -456,11 +468,11 @@
         }
 
         measuresInvalid = false
-        const rangeKey = formatMeasureRange(range.first, range.last)
+        const rangeKey = formatMeasureRange(range.firstNumber, range.lastNumber)
         if (rangeKey === lastAppliedRangeKey && debounceTimer === null && activeController === null) return
 
         if (immediate) {
-            applyMeasureSlice(range.first, range.last)
+            applyMeasureSlice(range.first, range.last, rangeKey)
             return
         }
 
@@ -468,7 +480,7 @@
         const token = ++requestToken
         debounceTimer = setTimeout(() => {
             debounceTimer = null
-            if (!destroyed && token === requestToken) applyMeasureSlice(range.first, range.last, token)
+            if (!destroyed && token === requestToken) applyMeasureSlice(range.first, range.last, rangeKey, token)
         }, 250)
     }
 
@@ -759,7 +771,7 @@
                     <p class="label">{openedFileLabel}</p>
                 {/if}
                 <div class="measuresField" class:invalid={measuresInvalid}>
-                    <MaterialTextInput label="sheet_music.measures" value={measuresInput} placeholder={openedFileMeasures > 1 ? `1-${openedFileMeasures}` : "1"} on:input={(e) => handleMeasuresInput(e.detail, false)} on:change={(e) => handleMeasuresInput(e.detail, true)} />
+                    <MaterialTextInput label="sheet_music.measures" value={measuresInput} placeholder={measuresPlaceholder} disabled={loadingFile} on:input={(e) => handleMeasuresInput(e.detail, false)} on:change={(e) => handleMeasuresInput(e.detail, true)} />
                     {#if measuresInvalid}
                         <p class="error"><T id="sheet_music.measures_invalid" /></p>
                     {/if}

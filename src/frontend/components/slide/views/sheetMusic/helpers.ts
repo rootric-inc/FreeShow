@@ -67,6 +67,22 @@ export function getSheetMusicMeasures(sheetMusic: unknown): string {
     return typeof measures === "string" ? measures : ""
 }
 
+export const SHEET_MUSIC_POPUP_OWNED_FIELDS = ["data", "abc", "label", "measures"] as const
+
+export function mergeSheetMusicOwnedFields(existing: unknown, incoming: unknown): Record<string, any> {
+    const next: Record<string, any> = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, any>) } : {}
+    if (Array.isArray(next.customParts)) next.customParts = [...next.customParts]
+
+    const source: Record<string, any> = incoming && typeof incoming === "object" && !Array.isArray(incoming) ? (incoming as Record<string, any>) : {}
+    for (const key of SHEET_MUSIC_POPUP_OWNED_FIELDS) {
+        const value = source[key]
+        if (typeof value === "string" && value.length > 0) next[key] = value
+        else delete next[key]
+    }
+
+    return next
+}
+
 export function getSheetMusicDisplayLabel(sheetMusic: unknown): string {
     const label = getSheetMusicLabel(sheetMusic)
     const measures = getSheetMusicMeasures(sheetMusic).trim()

@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { getItemSetValue } from "../../helpers/itemValues"
-import { copyStyleValues, getStyleLeafRoots, getStylePastePlan, mergeStyleValues, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
+import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, mergeStyleValues, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput, StylePastePlan } from "./styleValues"
 
 const chartInputs: StyleInput[] = [
@@ -520,5 +522,73 @@ describe("setStyleLeaf", () => {
         expect(withCustomA.data).toBe("<mei>hymnA</mei>")
         expect(withCustomB.data).toBe("<mei>hymnB</mei>")
         expect(withCustomB.customParts).toEqual(["1.1", "2.1"])
+    })
+})
+
+describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
+    it("copies size, parts, customParts and verses and never copies data, abc, label or measures", () => {
+        const boxesSource = readFileSync(fileURLToPath(new URL("../values/boxes.ts", import.meta.url)), "utf8")
+        const sheetMusicBlock = boxesSource.slice(boxesSource.indexOf("sheet_music: {"))
+        expect(sheetMusicBlock).toContain('type: "popup", id: "sheet_music"')
+        expect(sheetMusicBlock).toContain('id: "sheet_music.size"')
+        expect(sheetMusicBlock).toContain('id: "sheet_music.parts"')
+        expect(sheetMusicBlock).toContain('id: "sheet_music.verses"')
+
+        const declaredSheetMusicInputs: StyleInput[] = [
+            { id: "sheet_music", type: "popup" },
+            { id: "style", type: "color" },
+            { id: "sheet_music.size", type: "number" },
+            { id: "sheet_music.parts", type: "dropdown" },
+            { id: "sheet_music.verses", type: "dropdown" }
+        ]
+        const inputs = withExtraStyleLeaves(declaredSheetMusicInputs, EXTRA_STYLE_LEAVES)
+
+        const source = {
+            type: "sheet_music" as const,
+            style: "left: 100px; width: 1500px; color: #ffeedd;",
+            sheet_music: {
+                data: "<mei>source</mei>",
+                abc: "M: 4/4\nK: C\nC4 |",
+                label: "Amazing Grace",
+                measures: "5-8",
+                size: 130,
+                parts: "custom" as const,
+                customParts: ["1.1", "2.1"],
+                verses: "2"
+            }
+        }
+
+        const copied = copyStyleValues(source, inputs)
+        expect(copied).toEqual({
+            sheet_music: {
+                size: 130,
+                parts: "custom",
+                customParts: ["1.1", "2.1"],
+                verses: "2"
+            }
+        })
+        expect("data" in copied.sheet_music).toBe(false)
+        expect("abc" in copied.sheet_music).toBe(false)
+        expect("label" in copied.sheet_music).toBe(false)
+        expect("measures" in copied.sheet_music).toBe(false)
+
+        const target = {
+            data: "<mei>target</mei>",
+            abc: "M: 3/4\nK: G\nG3 |",
+            label: "Holy, Holy, Holy",
+            measures: "1-4",
+            size: 100,
+            parts: "all"
+        }
+        expect(mergeStyleValues(target, copied.sheet_music, true)).toEqual({
+            data: "<mei>target</mei>",
+            abc: "M: 3/4\nK: G\nG3 |",
+            label: "Holy, Holy, Holy",
+            measures: "1-4",
+            size: 130,
+            parts: "custom",
+            customParts: ["1.1", "2.1"],
+            verses: "2"
+        })
     })
 })

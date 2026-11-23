@@ -9,7 +9,7 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
-import { copyStyleValues, getStyleLeafRoots, getStylePastePlan, withExtraStyleLeaves } from "./styleValues"
+import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput } from "./styleValues"
 
 type StyleClipboard = {
@@ -340,14 +340,12 @@ export function getItemKeys(isBox = false) {
     return itemKeys
 }
 
-const extraStyleLeaves = ["cropping.type", "sheet_music.customParts"]
-
 function getBoxStyleInputs(type?: ItemType): StyleInput[] {
     const inputs = Object.values(itemBoxes[type || "text"]?.sections || {})
         .map((a) => a.inputs.flat())
         .flat()
 
-    return withExtraStyleLeaves(inputs, extraStyleLeaves)
+    return withExtraStyleLeaves(inputs, EXTRA_STYLE_LEAVES)
 }
 
 function getSpecialBoxValues(item: Item) {

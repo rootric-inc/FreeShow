@@ -39,6 +39,7 @@
         if (input.type === "toggle") return styles[input.key || ""] || ""
         if (input.type === "radio") return customValues[input.key || ""] || ""
         if (input.id.includes("CSS")) return getStyleString(input)
+        if (customValues[input.id] !== undefined) return customValues[input.id]
 
         const defaultValue = input.value
         let value: any = null

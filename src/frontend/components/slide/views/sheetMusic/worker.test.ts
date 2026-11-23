@@ -5,8 +5,8 @@ import { beforeAll, describe, expect, it } from "vitest"
 import { parseSvgViewBox, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 import { convertAndCheckAbc } from "./abcToMei"
 import { calculatePageWidth, getItemRatioFromStyle } from "./helpers"
-import { filterMei, summarizeMei } from "./meiParts"
-import { resolvePartsSelection } from "./parts"
+import { filterMei, getMeasureNumbers, summarizeMei } from "./meiParts"
+import { resolveMeasureRange, resolvePartsSelection } from "./parts"
 
 const verovioModulePath = fileURLToPath(new URL("../../../../../../public/assets/sheet-music/verovio-module.mjs", import.meta.url))
 const verovioPath = fileURLToPath(new URL("../../../../../../public/assets/sheet-music/verovio.mjs", import.meta.url))
@@ -74,12 +74,36 @@ const ONE_MEASURE_MUSICXML = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`
 
+function hasVisibleMeterSig(svg: string): boolean {
+    const matches = svg.match(/<g\b[^>]*class="[^"]*\bmeterSig\b[^"]*"[^>]*>/g) || []
+    return matches.some((tag) => !tag.includes('visibility="hidden"'))
+}
+
+function getDistinctVerseYs(svg: string): number[] {
+    const ys = new Set<number>()
+    const pattern = /class="verse"[\s\S]*?<text[^>]*y="(\d+)"/g
+    let match: RegExpExecArray | null
+    while ((match = pattern.exec(svg)) !== null) {
+        ys.add(Number(match[1]))
+    }
+    return Array.from(ys).sort((a, b) => a - b)
+}
+
+function getFilteredLogLines(rawLog: string): string[] {
+    return rawLog
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && !line.includes("No header"))
+}
+
 describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-music/verovio-module.mjs from preBuild)", () => {
     let handleMessage: (message: Record<string, unknown>) => Promise<any>
+    let getLastRenderLog: () => string
 
     beforeAll(async () => {
         const mod = await import(/* @vite-ignore */ workerModuleHref)
         handleMessage = mod.handleMessage
+        getLastRenderLog = mod.getLastRenderLog
     })
 
     it("loads MusicXML into normalized MEI without meiHead and with bar.thru set to false", async () => {
@@ -188,7 +212,7 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(recovered.measures).toBe(4)
     })
 
-    it("renders filtered MEI for every parts preset with the expected number of staves", async () => {
+    it("renders filtered MEI for every parts preset without Verovio warnings, checks verse rows, and keeps refrain words", async () => {
         const abc = [
             "T: Four-Part Hymn",
             "M: 4/4",
@@ -199,17 +223,26 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
             "V: A",
             "V: T clef=bass octave=-1",
             "V: B clef=bass octave=-1",
-            "[V:S] d e d c | d c B c | d e d c | d4 |",
-            "w: 1.~Praise God from whom all bless-ings flow, praise him all crea-tures here be-low;",
-            "w: 2.~Praise him a-bove, ye heav'n-ly host, praise Fa-ther, Son, and Ho-ly Ghost.",
-            "[V:A] B G F F | F F G A | B G F F | F4 |",
-            "[V:T] f e d c | B A d c | f e d c | B4 |",
-            "[V:B] D C B, F | B, F G F | D C B, F | B,4 |"
+            "[V:S] d e d c | d c B c |",
+            "w: 1.~Praise God from whom | all bless-ings flow,",
+            "w: 2.~Praise him a-bove, | ye heav'n-ly host,",
+            "[V:A] B G F F | F F G A |",
+            "[V:T] f e d c | B A d c |",
+            "[V:B] D C B, F | B, F G F |",
+            "[V:S] d e d c | d4 |",
+            "w: Yes, Je-sus loves | me!",
+            "[V:A] B G F F | F4 |",
+            "[V:T] f e d c | B4 |",
+            "[V:B] D C B, F | B,4 |"
         ].join("\n")
 
         const fullMei = convertAndCheckAbc(abc, abcjs.parseOnly).mei
         const summary = summarizeMei(fullMei)
         expect(summary.measures).toBe(4)
+
+        const allRendered = await handleMessage({ type: "render", mei: fullMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getDistinctVerseYs(allRendered.svg)).toHaveLength(2)
 
         const cases: { preset: "all" | "upper" | "lower" | "melody" | "custom"; custom?: string[]; expectedStavesPerMeasure: number }[] = [
             { preset: "all", expectedStavesPerMeasure: 2 },
@@ -222,12 +255,48 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
 
         for (const testCase of cases) {
             const resolved = resolvePartsSelection(testCase.preset, testCase.custom, summary)
-            const filtered = filterMei(fullMei, { parts: resolved.parts, verses: [1], highestNoteOnly: resolved.highestNoteOnly })
+            const filtered = filterMei(fullMei, { parts: resolved.parts, verses: [2], highestNoteOnly: resolved.highestNoteOnly })
             const rendered = await handleMessage({ type: "render", mei: filtered, pageWidth: 1840 })
 
             expect(rendered.svg).toContain("<svg")
+            expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
             const staffGroups = rendered.svg.match(/class="staff"/g) || []
             expect(staffGroups).toHaveLength(summary.measures * testCase.expectedStavesPerMeasure)
+        }
+
+        // Verse 2 alone has 1 verse row (same height as verse 1, no blank row above) and keeps the refrain words
+        const verse1Mei = filterMei(fullMei, { parts: "all", verses: [1] })
+        const verse2Mei = filterMei(fullMei, { parts: "all", verses: [2] })
+        const verse1Rendered = await handleMessage({ type: "render", mei: verse1Mei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        const verse2Rendered = await handleMessage({ type: "render", mei: verse2Mei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+
+        expect(getDistinctVerseYs(verse1Rendered.svg)).toHaveLength(1)
+        expect(getDistinctVerseYs(verse2Rendered.svg)).toHaveLength(1)
+        expect(parseSvgViewBox(verse2Rendered.svg)!.height).toBe(parseSvgViewBox(verse1Rendered.svg)!.height)
+        expect(verse2Rendered.svg).toContain("heav'n")
+        expect(verse2Rendered.svg).toContain("Yes,")
+        expect(verse2Rendered.svg).toContain("me!")
+        expect(verse2Rendered.svg).not.toContain("bless")
+
+        // Nested two-staff choir + two-staff piano renders cleanly when emptying one group or leaving one staff in a group
+        const note = (step: string, oct: number, staff: number) => `<note><pitch><step>${step}</step><octave>${oct}</octave></pitch><duration>4</duration><voice>${staff}</voice><type>whole</type><staff>${staff}</staff></note>`
+        const part = (id: string, top: string, bottom: string) => `<part id="${id}"><measure number="1"><attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><staves>2</staves><clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>${note(top, 4, 1)}<backup><duration>4</duration></backup>${note(bottom, 3, 2)}</measure></part>`
+        const choirPianoXml = `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Choir</part-name></score-part><score-part id="P2"><part-name>Piano</part-name></score-part></part-list>${part("P1", "C", "E")}${part("P2", "G", "C")}</score-partwise>`
+        const loadedChoirPiano = await handleMessage({ type: "load", text: choirPianoXml })
+
+        for (const custom of [
+            ["1.1", "2.2"],
+            ["3.1", "4.2"],
+            ["1.1", "2.2", "3.1"]
+        ]) {
+            const filtered = filterMei(loadedChoirPiano.mei, { parts: custom, verses: "all" })
+            const rendered = await handleMessage({ type: "render", mei: filtered, pageWidth: 1840 })
+            expect(rendered.svg).toContain("<svg")
+            expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+            expect(rendered.svg.match(/class="staff"/g) || []).toHaveLength(custom.length)
+            expect(rendered.svg.match(/class="grpSym"/g) || []).toHaveLength(1)
         }
 
         // Melody preset on a two-staff chorded hymn collapses chords to the top note on staff 1
@@ -240,50 +309,121 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         const melodyMei = filterMei(chordedMei, { parts: melodyResolved.parts, verses: "all", highestNoteOnly: true })
         const melodyRendered = await handleMessage({ type: "render", mei: melodyMei, pageWidth: 1840 })
         expect(melodyRendered.svg).toContain("<svg")
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
         expect(melodyRendered.svg.match(/class="staff"/g) || []).toHaveLength(2)
     })
 
-    it("slices a 16-bar hymn with key, clefs, and meter visibility matching the starting measure", async () => {
+    it("slices a 16-bar hymn with hidden meter on middle slices, visible meter from bar 1, and no measure numbers drawn", async () => {
         const makeBar = (n: number) =>
             `<measure n="${n}"><staff n="1"><layer n="1"><note xml:id="s${n}" dur.ppq="1" dur="1" oct="5" pname="d" stem.dir="up" /></layer><layer n="2"><note xml:id="a${n}" dur.ppq="1" dur="1" oct="4" pname="f" stem.dir="down" /></layer></staff><staff n="2"><layer n="5"><note xml:id="t${n}" dur.ppq="1" dur="1" oct="3" pname="b" stem.dir="up" accid.ges="f" /></layer><layer n="6"><note xml:id="b${n}" dur.ppq="1" dur="1" oct="2" pname="b" stem.dir="down" accid.ges="f" /></layer></staff>${n === 4 ? `<tie startid="#s4" endid="#s5" />` : ""}${n === 8 ? `<tie startid="#s8" endid="#s9" />` : ""}</measure>`
         const bars = Array.from({ length: 16 }, (_, i) => makeBar(i + 1)).join("")
         const hymn16Mei = `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="6.0-dev"><music><body><mdiv><score><scoreDef><staffGrp bar.thru="false"><grpSym symbol="brace" /><staffDef n="1" lines="5" ppq="1"><clef shape="G" line="2" /><keySig sig="2f" /><meterSig count="4" unit="4" /></staffDef><staffDef n="2" lines="5" ppq="1"><clef shape="F" line="4" /><keySig sig="2f" /><meterSig count="4" unit="4" /></staffDef></staffGrp></scoreDef><section>${bars}</section></score></mdiv></body></music></mei>`
 
-        // Middle slice (5-8) crosses ties at both edges: 4 measures, keeps key & clefs, no time signature
+        // Middle slice (5-8): 4 measures, keeps key, clefs and hidden meter, no measure numbers in SVG
         const middle = await handleMessage({ type: "slice", mei: hymn16Mei, first: 5, last: 8 })
         expect(middle.measures).toBe(4)
         expect(middle.mei).toContain('sig="2f"')
         expect(middle.mei).toContain('shape="G"')
         expect(middle.mei).toContain('shape="F"')
-        expect(middle.mei).not.toContain("<meterSig")
-        expect(middle.mei).not.toContain("meter.count=")
+        expect(middle.mei).toContain('visible="false"')
+        expect(middle.mei).not.toContain('mnum.visible="false"')
 
         const middleRendered = await handleMessage({ type: "render", mei: middle.mei, pageWidth: 1840 })
         expect(middleRendered.svg).toContain("<svg")
         expect(middleRendered.svg).toContain('class="clef"')
         expect(middleRendered.svg).toContain('class="keySig"')
-        expect(middleRendered.svg).not.toContain('class="meterSig"')
+        expect(hasVisibleMeterSig(middleRendered.svg)).toBe(false)
+        expect(middleRendered.svg).not.toMatch(/class="[^"]*\bmNum\b[^"]*"/)
         expect(middleRendered.svg.match(/class="staff"/g) || []).toHaveLength(8)
 
-        // Slice from measure 1 keeps the time signature
+        // Slice starting at bar 13 and a narrow multi-line render both draw no measure numbers
+        const late = await handleMessage({ type: "slice", mei: hymn16Mei, first: 13, last: 16 })
+        const lateRendered = await handleMessage({ type: "render", mei: late.mei, pageWidth: 1840 })
+        expect(lateRendered.svg).not.toMatch(/class="[^"]*\bmNum\b[^"]*"/)
+
+        const multiLine = await handleMessage({ type: "render", mei: hymn16Mei, pageWidth: 700 })
+        expect((multiLine.svg.match(/class="system"/g) || []).length).toBeGreaterThan(1)
+        expect(multiLine.svg).not.toMatch(/class="[^"]*\bmNum\b[^"]*"/)
+
+        // Slice from measure 1 keeps the time signature visible
         const opening = await handleMessage({ type: "slice", mei: hymn16Mei, first: 1, last: 4 })
         expect(opening.measures).toBe(4)
         const openingRendered = await handleMessage({ type: "render", mei: opening.mei, pageWidth: 1840 })
-        expect(openingRendered.svg).toContain('class="meterSig"')
+        expect(hasVisibleMeterSig(openingRendered.svg)).toBe(true)
         expect(openingRendered.svg.match(/class="staff"/g) || []).toHaveLength(8)
     })
 
-    it("keeps an earlier key signature change in force for a later slice", async () => {
+    it("keeps an earlier key signature change in force and hides the unchanged meter for a later slice", async () => {
         const keyChangeMei = `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="1s" meter.count="4" meter.unit="4"><staffGrp symbol="brace" bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2" /><staffDef n="2" lines="5" clef.shape="F" clef.line="4" /></staffGrp></scoreDef><section><measure n="1"><staff n="1"><layer n="1"><note dur="1" pname="g" oct="4" /></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="g" oct="3" /></layer></staff></measure><measure n="2"><staff n="1"><layer n="1"><note dur="1" pname="a" oct="4" /></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="a" oct="3" /></layer></staff></measure><scoreDef keysig="3f" /><measure n="3"><staff n="1"><layer n="1"><note dur="1" pname="e" oct="4" /></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="e" oct="3" /></layer></staff></measure><measure n="4"><staff n="1"><layer n="1"><note dur="1" pname="g" oct="4" /></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="g" oct="3" /></layer></staff></measure></section></score></mdiv></body></music></mei>`
 
         const laterSlice = await handleMessage({ type: "slice", mei: keyChangeMei, first: 4, last: 4 })
         expect(laterSlice.measures).toBe(1)
         expect(laterSlice.mei).toContain('keysig="3f"')
-        expect(laterSlice.mei).not.toContain("meter.count=")
+        expect(laterSlice.mei).toContain('meter.visible="false"')
 
         const rendered = await handleMessage({ type: "render", mei: laterSlice.mei, pageWidth: 1840 })
         expect(rendered.svg).toContain("<svg")
         expect(rendered.svg).toContain('class="keySig"')
-        expect(rendered.svg).not.toContain('class="meterSig"')
+        expect(hasVisibleMeterSig(rendered.svg)).toBe(false)
+    })
+
+    it("slices by printed bar numbers on a pickup-bar file and keeps a time signature change at the slice's first bar visible", async () => {
+        const makeNote = (step: string, oct: number, dur: number, type: string, extra = "") => `<note><pitch><step>${step}</step><octave>${oct}</octave></pitch><duration>${dur}</duration><voice>1</voice><type>${type}</type>${extra}</note>`
+        const xml =
+            `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1"><part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list><part id="P1">` +
+            `<measure number="0" implicit="yes"><attributes><divisions>1</divisions><key><fifths>-1</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>${makeNote("C", 5, 1, "quarter")}</measure>` +
+            `<measure number="1">${makeNote("F", 4, 4, "whole")}</measure>` +
+            `<measure number="2">${makeNote("G", 4, 4, "whole")}</measure>` +
+            `<measure number="3">${makeNote("A", 4, 4, "whole")}</measure>` +
+            `<measure number="4">${makeNote("B", 4, 4, "whole")}</measure>` +
+            `<measure number="5"><attributes><key><fifths>2</fifths></key></attributes>${makeNote("E", 5, 4, "whole")}</measure>` +
+            `<measure number="6"><attributes><time><beats>3</beats><beat-type>4</beat-type></time></attributes>${makeNote("D", 5, 3, "half", "<dot/>")}</measure>` +
+            `<measure number="7">${makeNote("C", 5, 3, "half", "<dot/>")}</measure>` +
+            `</part></score-partwise>`
+
+        const loaded = await handleMessage({ type: "load", text: xml })
+        const numbers = getMeasureNumbers(loaded.mei)
+        expect(numbers).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+
+        // Typing "2-3" resolves to positions 3..4 and slices bars n="2" and n="3"
+        const range23 = resolveMeasureRange("2-3", numbers)!
+        expect(range23).toEqual({ first: 3, last: 4, firstNumber: 2, lastNumber: 3 })
+        const slice23 = await handleMessage({ type: "slice", mei: loaded.mei, first: range23.first, last: range23.last })
+        expect(getMeasureNumbers(slice23.mei)).toEqual([2, 3])
+        const rendered23 = await handleMessage({ type: "render", mei: slice23.mei, pageWidth: 1840 })
+        expect(hasVisibleMeterSig(rendered23.svg)).toBe(false)
+
+        // Slicing from bar 5 (key change only, meter unchanged) hides the meter
+        const range5 = resolveMeasureRange("5", numbers)!
+        const slice5 = await handleMessage({ type: "slice", mei: loaded.mei, first: range5.first, last: range5.last })
+        const rendered5 = await handleMessage({ type: "render", mei: slice5.mei, pageWidth: 1840 })
+        expect(hasVisibleMeterSig(rendered5.svg)).toBe(false)
+
+        // Slicing from bar 6 (4/4 -> 3/4 time change right at bar 6) keeps 3/4 visible
+        const range67 = resolveMeasureRange("6-7", numbers)!
+        const slice67 = await handleMessage({ type: "slice", mei: loaded.mei, first: range67.first, last: range67.last })
+        expect(getMeasureNumbers(slice67.mei)).toEqual([6, 7])
+        const rendered67 = await handleMessage({ type: "render", mei: slice67.mei, pageWidth: 1840 })
+        expect(hasVisibleMeterSig(rendered67.svg)).toBe(true)
+    })
+
+    it("keeps a 6/8 tstamp chord symbol aligned on its note in a slice from bar 2", async () => {
+        const makeBar = (n: number) => `<measure n="${n}"><staff n="1"><layer n="1"><note xml:id="a${n}" dur="4" dots="1" oct="4" pname="c"/><note xml:id="b${n}" dur="4" dots="1" oct="4" pname="g"/></layer></staff><harm staff="1" tstamp="4">G${n}</harm><dynam staff="1" tstamp="4">p</dynam></measure>`
+        const mei68 = `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="6" meter.unit="8"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section>${makeBar(1)}${makeBar(2)}${makeBar(3)}</section></score></mdiv></body></music></mei>`
+
+        const sliced = await handleMessage({ type: "slice", mei: mei68, first: 2, last: 2 })
+        expect(sliced.mei).toContain('meter.count="6"')
+        expect(sliced.mei).toContain('meter.unit="8"')
+        expect(sliced.mei).toContain('meter.visible="false"')
+
+        const rendered = await handleMessage({ type: "render", mei: sliced.mei, pageWidth: 1840 })
+        expect(hasVisibleMeterSig(rendered.svg)).toBe(false)
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+
+        const noteheadXs = [...rendered.svg.matchAll(/class="notehead"[^>]*>\s*<use[^>]*transform="translate\((\d+)/g)].map((m) => Number(m[1]))
+        const harmXs = [...rendered.svg.matchAll(/class="harm"[\s\S]*?<text[^>]*x="(\d+)"/g)].map((m) => Number(m[1]))
+        expect(noteheadXs).toHaveLength(2)
+        expect(harmXs).toHaveLength(1)
+        expect(Math.abs(harmXs[0] - noteheadXs[1])).toBeLessThan(100)
     })
 })
