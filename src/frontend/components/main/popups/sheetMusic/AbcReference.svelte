@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte"
     import { translateText } from "../../../../utils/language"
+    import T from "../../../helpers/T.svelte"
 
     type ReferenceEntry = { insertText: string; pitchLabel: string } | { insertText: string; labelKey: string }
 
@@ -107,20 +108,27 @@
 </script>
 
 <details class="cheatSheet">
-    <summary class="toggle">{translateText("sheet_music.cheat_sheet")}</summary>
+    <summary class="toggle"><T id="sheet_music.cheat_sheet" /></summary>
     <div class="cheatRows">
+        <p class="note"><T id="sheet_music.reference_note" /></p>
         {#each REFERENCE_GROUPS as group}
-            <div class="heading">{group.headingKeys.map((key) => translateText(key)).join(" / ")}</div>
+            <div class="heading">
+                {#each group.headingKeys as key, index}
+                    {#if index > 0}
+                        /
+                    {/if}<T id={key} />
+                {/each}
+            </div>
             {#each group.rows as row}
                 <div class="row">
                     {#if row.subtitleKey}
-                        <span class="sub">{translateText(row.subtitleKey)}</span>
+                        <span class="sub"><T id={row.subtitleKey} /></span>
                     {/if}
                     {#each row.entries as entry}
                         <button type="button" class="chip" title={getEntryTitle(entry)} on:click={() => dispatch("insert", entry.insertText)}>
                             <code>{entry.insertText}</code>
                             {#if "labelKey" in entry}
-                                <span>{translateText(entry.labelKey)}</span>
+                                <span><T id={entry.labelKey} /></span>
                             {/if}
                         </button>
                     {/each}
@@ -155,6 +163,12 @@
         flex-direction: column;
         gap: 4px;
         padding: 2px 2px 6px;
+    }
+
+    .note {
+        font-size: 0.75em;
+        opacity: 0.65;
+        margin-bottom: 2px;
     }
 
     .heading {

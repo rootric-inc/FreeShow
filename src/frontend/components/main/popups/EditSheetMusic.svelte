@@ -1,5 +1,4 @@
 <script lang="ts">
-    import type { TuneObject } from "abcjs"
     import { onDestroy, onMount, tick } from "svelte"
     import { uid } from "uid"
     import type { DropdownOptions } from "../../../../types/Input"
@@ -16,12 +15,12 @@
     import MaterialButton from "../../inputs/MaterialButton.svelte"
     import MaterialDropdown from "../../inputs/MaterialDropdown.svelte"
     import type { AbcProblem } from "../../slide/views/sheetMusic/abcChecks"
-    import { checkAbcTune, mergeNeighborProblems } from "../../slide/views/sheetMusic/abcChecks"
+    import { mergeNeighborProblems } from "../../slide/views/sheetMusic/abcChecks"
     import { loadAbcjs } from "../../slide/views/sheetMusic/abcjs"
     import type { AbcHeaderInfo, AbcPartsLayout } from "../../slide/views/sheetMusic/abcSource"
     import { ABC_KEYS, ABC_METERS, createAbcTemplate, insertAbcAtCursor, normalizeLineEndings, readAbcHeader, updateAbcHeaderField } from "../../slide/views/sheetMusic/abcSource"
     import type { AbcNoteRange } from "../../slide/views/sheetMusic/abcToMei"
-    import { convertTuneToMei } from "../../slide/views/sheetMusic/abcToMei"
+    import { convertAndCheckAbc } from "../../slide/views/sheetMusic/abcToMei"
     import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic } from "../../slide/views/sheetMusic/engine"
     import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicSize, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
     import Tabs from "../Tabs.svelte"
@@ -39,8 +38,15 @@
 
     interface TaskOptions {
         fallbackError: "load" | "render"
-        isParserTask?: boolean
+        isAbcTask?: boolean
         existingToken?: number
+    }
+
+    class AbcParserLoadError extends Error {
+        constructor(cause: unknown) {
+            super(cause instanceof Error ? cause.message : "Could not load ABC music parser")
+            this.name = "AbcParserLoadError"
+        }
     }
 
     const PICK_ID = uid()
@@ -48,6 +54,8 @@
     const SVG_ID_PREFIX = "sm_popup_"
     // Verovio may append a numeric or named suffix to a prefixed MEI xml:id on child note elements
     const PREVIEW_NOTE_ID_PATTERN = /^sm_popup_c(\d+)(?:-\d+|_\w+)?$/
+
+    const onSave: ((data: SheetMusicState) => void) | undefined = $popupData.trigger
 
     const popupTabs: TabsObj = {
         type: { name: "sheet_music.tab_type", icon: "edit" },
@@ -73,6 +81,11 @@
     let previousTab: PopupTab = activeTab
 
     let text = normalizeLineEndings(current.abc || "")
+    let lastSavedAbc = text
+    let pendingSaveAbc: string | null = null
+    let saveToken = 0
+    let applyingProgrammaticEdit = false
+
     const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
     let selectedKey = initialHeader.key
     let selectedMeter = initialHeader.meter
@@ -119,6 +132,14 @@
         handleTabChange(activeTab)
     }
 
+    async function loadParser() {
+        try {
+            return await loadAbcjs()
+        } catch (err) {
+            throw new AbcParserLoadError(err)
+        }
+    }
+
     function cancelPending() {
         if (debounceTimer !== null) {
             clearTimeout(debounceTimer)
@@ -128,6 +149,21 @@
             activeController.abort()
             activeController = null
         }
+    }
+
+    function setTaskError(err: unknown, options: TaskOptions) {
+        if (err instanceof AbcParserLoadError) {
+            error = translateText("error.sheet_music_parser")
+            if (options.isAbcTask) hasAbcError = true
+            return
+        }
+        if (options.isAbcTask && !(err instanceof SheetMusicError)) {
+            error = translateText("error.sheet_music_abc")
+            hasAbcError = true
+            return
+        }
+        error = translateText(getSheetMusicErrorKey(err, options.fallbackError))
+        if (options.isAbcTask) hasAbcError = true
     }
 
     async function runTask(task: (signal: AbortSignal, isLive: () => boolean) => Promise<void>, options: TaskOptions) {
@@ -144,17 +180,60 @@
         } catch (err) {
             if ((err instanceof SheetMusicError && err.code === "aborted") || !isLive()) return
             console.error("Sheet music popup error:", err)
-
-            if (options.isParserTask && !(err instanceof SheetMusicError)) {
-                error = translateText("error.sheet_music_parser")
-                hasAbcError = true
-            } else {
-                error = translateText(getSheetMusicErrorKey(err, options.fallbackError))
-                if (options.isParserTask) hasAbcError = true
-            }
+            setTaskError(err, options)
         } finally {
             if (activeController === controller) activeController = null
             if (isLive()) loading = false
+        }
+    }
+
+    // Single save path used by both live typing and closing/tab-switching; never aborted on close
+    async function saveAbc(source: string): Promise<void> {
+        const normalized = normalizeLineEndings(source)
+        if (!normalized.trim() || normalized === lastSavedAbc || normalized === pendingSaveAbc) return
+
+        const token = ++saveToken
+        pendingSaveAbc = normalized
+
+        try {
+            const abcjs = await loadParser()
+            if (token !== saveToken) return
+
+            const analysis = convertAndCheckAbc(normalized, abcjs.parseOnly)
+            if (!analysis.mei || analysis.hasError) {
+                if (token === saveToken) pendingSaveAbc = null
+                return
+            }
+
+            const cleaned = await loadMusic({ text: analysis.mei })
+            if (token !== saveToken) return
+
+            const nextState: SheetMusicState = {
+                abc: normalized,
+                data: cleaned.mei
+            }
+            if (analysis.title) nextState.label = analysis.title
+            if (current.size !== undefined) nextState.size = current.size
+
+            lastSavedAbc = normalized
+            pendingSaveAbc = null
+            current = nextState
+            if (!destroyed) previewData = cleaned.mei
+
+            if (onSave) onSave({ ...nextState })
+        } catch (err) {
+            if (token === saveToken) pendingSaveAbc = null
+            console.error("Sheet music save error:", err)
+            if (!destroyed && token === saveToken) {
+                setTaskError(err, { fallbackError: "load", isAbcTask: true })
+            }
+        }
+    }
+
+    function flushPendingSave() {
+        const normalized = normalizeLineEndings(text)
+        if (normalized !== lastSavedAbc) {
+            void saveAbc(normalized)
         }
     }
 
@@ -173,6 +252,7 @@
     onDestroy(() => {
         destroyed = true
         cancelPending()
+        flushPendingSave()
         destroyMain(listenerId)
     })
 
@@ -184,11 +264,11 @@
         confirmReplace = false
 
         if (tab === "file") {
+            flushPendingSave()
             if (current.data && current.data !== previewData) renderFilePreview(current.data)
             return
         }
 
-        text = normalizeLineEndings(current.abc || "")
         if (text.trim()) {
             syncHeader(text)
             runConvert(text, false)
@@ -253,12 +333,16 @@
                 }
                 if (current.size !== undefined) nextState.size = current.size
 
+                saveToken++
+                pendingSaveAbc = null
+                lastSavedAbc = ""
+                text = ""
                 current = nextState
                 previewData = loaded.mei
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
                 truncated = rendered.pages > 1
 
-                if ($popupData.trigger) $popupData.trigger({ ...current })
+                if (onSave) onSave({ ...current })
             },
             { fallbackError: "load" }
         )
@@ -295,28 +379,18 @@
 
         runTask(
             async (signal, isLive) => {
-                const abcjs = await loadAbcjs()
+                const abcjs = await loadParser()
                 if (!isLive()) return
 
                 const normalized = normalizeLineEndings(source)
-                let tune: TuneObject | undefined
-                try {
-                    const parsed = abcjs.parseOnly(normalized)
-                    tune = parsed && parsed[0]
-                } catch {
-                    tune = undefined
-                }
+                const analysis = convertAndCheckAbc(normalized, abcjs.parseOnly)
 
-                const converted = convertTuneToMei(tune, normalized)
-                const allProblems = checkAbcTune(tune, normalized, converted.problems)
-                const blocking = !converted.mei || allProblems.some((problem) => problem.severity === "error")
+                problems = mergeNeighborProblems(analysis.problems, normalized)
+                noteRanges = analysis.noteRanges || []
+                hasAbcError = analysis.hasError
+                if (analysis.hasError) return
 
-                problems = mergeNeighborProblems(allProblems, normalized)
-                noteRanges = converted.noteRanges || []
-                hasAbcError = blocking
-                if (blocking) return
-
-                const rendered = await renderMei(converted.mei, signal)
+                const rendered = await renderMei(analysis.mei, signal)
                 if (!isLive()) return
 
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
@@ -327,20 +401,50 @@
                 updateHighlight()
 
                 if (shouldSave) {
-                    const cleaned = await loadMusic({ text: converted.mei }, signal)
-                    if (!isLive()) return
-
-                    const label = converted.title || current.label || undefined
-                    const nextState: SheetMusicState = { ...current, abc: normalized, data: cleaned.mei }
-                    if (label) nextState.label = label
-                    current = nextState
-                    previewData = cleaned.mei
-
-                    if ($popupData.trigger) $popupData.trigger({ ...current })
+                    await saveAbc(normalized)
                 }
             },
-            { fallbackError: "render", isParserTask: true, existingToken }
+            { fallbackError: "render", isAbcTask: true, existingToken }
         )
+    }
+
+    // Apply edits via execCommand("insertText") so the textarea keeps its native Ctrl+Z undo stack
+    function replaceTextareaRange(start: number, end: number, replacement: string): number {
+        const clampedStart = Math.max(0, Math.min(text.length, Math.floor(start)))
+        const clampedEnd = Math.max(clampedStart, Math.min(text.length, Math.floor(end)))
+        const expected = text.slice(0, clampedStart) + replacement + text.slice(clampedEnd)
+        const nextCursor = clampedStart + replacement.length
+
+        if (textareaEl) {
+            applyingProgrammaticEdit = true
+            try {
+                textareaEl.focus()
+                textareaEl.setSelectionRange(clampedStart, clampedEnd)
+                const inserted = typeof document !== "undefined" && typeof document.execCommand === "function" && document.execCommand("insertText", false, replacement)
+                if (inserted && textareaEl.value === expected) {
+                    text = textareaEl.value
+                    return textareaEl.selectionStart
+                }
+            } finally {
+                applyingProgrammaticEdit = false
+            }
+        }
+
+        text = expected
+        return nextCursor
+    }
+
+    function replaceTextareaDiff(updated: string) {
+        if (updated === text) return
+        let start = 0
+        while (start < text.length && start < updated.length && text[start] === updated[start]) start++
+        let endOld = text.length
+        let endNew = updated.length
+        while (endOld > start && endNew > start && text[endOld - 1] === updated[endNew - 1]) {
+            endOld--
+            endNew--
+        }
+        replaceTextareaRange(start, endOld, updated.slice(start, endNew))
     }
 
     function changeHeader(field: "K" | "M", value: string) {
@@ -348,7 +452,7 @@
         else selectedMeter = value
 
         if (!text.trim()) return
-        text = updateAbcHeaderField(text, field, value)
+        replaceTextareaDiff(updateAbcHeaderField(text, field, value))
         scheduleConvert(text, true)
     }
 
@@ -359,7 +463,8 @@
 
     async function applyNewHymn() {
         confirmReplace = false
-        text = createAbcTemplate({ key: selectedKey, meter: selectedMeter, parts: selectedParts })
+        const template = createAbcTemplate({ key: selectedKey, meter: selectedMeter, parts: selectedParts })
+        replaceTextareaRange(0, text.length, template)
         scheduleConvert(text, false)
         await tick()
 
@@ -373,6 +478,7 @@
     }
 
     function handleTextInput() {
+        if (applyingProgrammaticEdit) return
         confirmReplace = false
         syncHeader(text)
         scheduleConvert(text, true)
@@ -385,9 +491,9 @@
 
         const selectionStart = textareaEl ? textareaEl.selectionStart : text.length
         const selectionEnd = textareaEl ? textareaEl.selectionEnd : text.length
-        const result = insertAbcAtCursor(text, snippet, selectionStart, selectionEnd)
+        const fallback = insertAbcAtCursor(text, snippet, selectionStart, selectionEnd)
+        const nextCursor = textareaEl ? replaceTextareaRange(selectionStart, selectionEnd, snippet) : ((text = fallback.value), fallback.cursor)
 
-        text = result.value
         confirmReplace = false
         syncHeader(text)
         scheduleConvert(text, true)
@@ -395,7 +501,7 @@
 
         if (textareaEl) {
             textareaEl.focus()
-            textareaEl.setSelectionRange(result.cursor, result.cursor)
+            textareaEl.setSelectionRange(nextCursor, nextCursor)
             updateHighlight()
         }
     }
@@ -455,19 +561,19 @@
 
     {#if activeTab === "type"}
         {#if current.data && !current.abc && !text.trim()}
-            <p class="notice">{translateText("sheet_music.type_replaces_file")}</p>
+            <p class="notice"><T id="sheet_music.type_replaces_file" /></p>
         {/if}
 
         <InputRow>
             <MaterialDropdown label="sheet_music.key" value={selectedKey} options={keyOptions} on:change={(e) => changeHeader("K", e.detail)} />
             <MaterialDropdown label="sheet_music.time" value={selectedMeter} options={meterOptions} on:change={(e) => changeHeader("M", e.detail)} />
             <MaterialDropdown label="sheet_music.parts" value={selectedParts} options={partsOptions} on:change={(e) => (selectedParts = e.detail)} />
-            <MaterialButton variant="outlined" icon="add" on:click={handleNewHymnClick} style="flex: 0 0 auto;">{translateText("sheet_music.new_hymn")}</MaterialButton>
+            <MaterialButton variant="outlined" icon="add" on:click={handleNewHymnClick} style="flex: 0 0 auto;"><T id="sheet_music.new_hymn" /></MaterialButton>
         </InputRow>
 
         {#if confirmReplace}
             <div class="confirmBar">
-                <span>{translateText("sheet_music.replace_confirm")}</span>
+                <span><T id="sheet_music.replace_confirm" /></span>
                 <div class="confirmActions">
                     <MaterialButton variant="outlined" small on:click={() => (confirmReplace = false)}>
                         <Icon id="close" style="fill: #ff5454;" size={1.1} white />
@@ -492,7 +598,7 @@
         <AbcProblemList {problems} on:select={handleSelectProblem} />
     {:else}
         <InputRow>
-            <MaterialButton variant="outlined" icon="music" disabled={loading} on:click={openFile} style="flex: 1;">{translateText("actions.open_file")}</MaterialButton>
+            <MaterialButton variant="outlined" icon="music" disabled={loading} on:click={openFile} style="flex: 1;"><T id="actions.open_file" /></MaterialButton>
         </InputRow>
 
         {#if current.label}
@@ -509,14 +615,14 @@
         {#if previewSvg}
             {@html previewSvg}
         {:else if loading}
-            <p class="status">{translateText("remote.loading")}</p>
+            <p class="status"><T id="remote.loading" /></p>
         {:else}
             <div class="empty"><Icon id="music" size={3} white /></div>
         {/if}
     </div>
 
     {#if truncated}
-        <p class="warning">{translateText("error.sheet_music_truncated")}</p>
+        <p class="warning"><T id="error.sheet_music_truncated" /></p>
     {/if}
 </div>
 

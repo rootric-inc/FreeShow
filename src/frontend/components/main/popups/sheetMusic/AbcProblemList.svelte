@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher } from "svelte"
-    import { translateText } from "../../../../utils/language"
+    import Icon from "../../../helpers/Icon.svelte"
+    import T from "../../../helpers/T.svelte"
     import type { AbcProblem } from "../../../slide/views/sheetMusic/abcChecks"
 
     export let problems: AbcProblem[] = []
@@ -12,8 +13,10 @@
     <div class="problems">
         {#each problems as problem}
             <button type="button" class="problem {problem.severity}" on:click={() => dispatch("select", problem)}>
-                <span class="badge">{problem.severity === "error" ? "×" : "!"}</span>
-                <span>{translateText(problem.key, null, problem.values)}</span>
+                <Icon id={problem.severity === "error" ? "remove_circle" : "warning"} size={0.85} white />
+                {#key problem.key}
+                    <span><T id={problem.key} replace={problem.values} /></span>
+                {/key}
             </button>
         {/each}
     </div>
@@ -44,12 +47,6 @@
 
     .problem:hover {
         background-color: var(--hover);
-    }
-
-    .badge {
-        font-weight: 700;
-        width: 14px;
-        text-align: center;
     }
 
     .problem.error {

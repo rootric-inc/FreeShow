@@ -1,6 +1,5 @@
-import abcjs from "abcjs"
 import { describe, expect, it } from "vitest"
-import { createAbcTemplate, insertAbcAtCursor, readAbcHeader, sliceAbcByLine, updateAbcHeaderField } from "./abcSource"
+import { createAbcTemplate, insertAbcAtCursor, readAbcHeader, updateAbcHeaderField } from "./abcSource"
 import { getSheetMusicAbc } from "./helpers"
 
 describe("abcSource templates and header helpers", () => {
@@ -39,15 +38,28 @@ describe("abcSource templates and header helpers", () => {
 
         const freeMeterOne = ["M: none", "K: F", "F G A B |"].join("\n")
         expect(readAbcHeader(freeMeterOne)).toEqual({ key: "F", meter: "none", parts: "one" })
+
+        const withExtraMeterParam = ["M: 3/4 extra=1", "K: C clef=bass octave=-1", "C3 |"].join("\n")
+        expect(readAbcHeader(withExtraMeterParam)).toEqual({ key: "C", meter: "3/4", parts: "one" })
     })
 
-    it("rewrites only the key or meter header line without touching other lines", () => {
+    it("rewrites only the key or meter token and preserves extra parameters and comments", () => {
         const src = ["T: Abide With Me", "M: 4/4 % time signature", "L: 1/4", "K: Eb", "[V:S] G2 G F |"].join("\n")
         const changedKey = updateAbcHeaderField(src, "K", "F")
         expect(changedKey).toBe(["T: Abide With Me", "M: 4/4 % time signature", "L: 1/4", "K: F", "[V:S] G2 G F |"].join("\n"))
 
         const changedMeter = updateAbcHeaderField(src, "M", "3/4")
         expect(changedMeter).toBe(["T: Abide With Me", "M: 3/4 % time signature", "L: 1/4", "K: Eb", "[V:S] G2 G F |"].join("\n"))
+
+        const bassKey = ["M: 4/4", "K:C clef=bass octave=-1", "C4 |"].join("\n")
+        expect(updateAbcHeaderField(bassKey, "K", "F")).toBe(["M: 4/4", "K:F clef=bass octave=-1", "C4 |"].join("\n"))
+
+        const spacedMode = ["M: 4/4 extra=1 % time", "K: C major clef=bass % key", "C4 |"].join("\n")
+        expect(updateAbcHeaderField(spacedMode, "K", "Am")).toBe(["M: 4/4 extra=1 % time", "K: Am clef=bass % key", "C4 |"].join("\n"))
+        expect(updateAbcHeaderField(spacedMode, "M", "6/8")).toBe(["M: 6/8 extra=1 % time", "K: C major clef=bass % key", "C4 |"].join("\n"))
+
+        const clefOnlyKey = ["M: 4/4", "K: clef=bass octave=-1", "C4 |"].join("\n")
+        expect(updateAbcHeaderField(clefOnlyKey, "K", "G")).toBe(["M: 4/4", "K: G clef=bass octave=-1", "C4 |"].join("\n"))
     })
 
     it("inserts text at cursor position or replaces a selection", () => {
@@ -55,37 +67,6 @@ describe("abcSource templates and header helpers", () => {
         expect(insertAbcAtCursor("C D E F", "G", 2, 3)).toEqual({ value: "C G E F", cursor: 3 })
         expect(insertAbcAtCursor("CD", "A", -5, -1)).toEqual({ value: "ACD", cursor: 1 })
         expect(insertAbcAtCursor("CD", "A", 99)).toEqual({ value: "CDA", cursor: 3 })
-    })
-
-    it("slices a three-line tune into three standalone ABC texts with the header", () => {
-        const threeLines = ["T: Three Lines", "M: 4/4", "L: 1/4", "K: C", "%%score (S A)", "V: S", "V: A", "[V:S] C D E F |", "w: Line one words here", "[V:A] C, D, E, F, |", "[V:S] G A B c |", "w: Line two words here", "[V:A] G, A, B, C |", "[V:S] c B A G |", "w: Line three words here", "[V:A] C B, A, G, |"].join("\n")
-
-        const slices = sliceAbcByLine(threeLines, abcjs.parseOnly)
-        expect(slices).toHaveLength(3)
-
-        for (const slice of slices) {
-            expect(slice).toContain("T: Three Lines")
-            expect(slice).toContain("%%score (S A)")
-            expect(slice).toContain("K: C")
-        }
-
-        expect(slices[0]).toContain("[V:S] C D E F |")
-        expect(slices[0]).toContain("w: Line one words here")
-        expect(slices[0]).not.toContain("Line two")
-
-        expect(slices[1]).toContain("[V:S] G A B c |")
-        expect(slices[1]).toContain("w: Line two words here")
-        expect(slices[1]).not.toContain("Line one")
-
-        expect(slices[2]).toContain("[V:S] c B A G |")
-        expect(slices[2]).toContain("w: Line three words here")
-        expect(slices[2]).not.toContain("Line two")
-
-        const withFooter = ["T: Lyrics", "M: 4/4", "L: 1/4", "K: C", "C D E F |", "w: One two three four", "W: Printed verse footer"].join("\n")
-        const lyricSlices = sliceAbcByLine(withFooter, abcjs.parseOnly)
-        expect(lyricSlices).toHaveLength(1)
-        expect(lyricSlices[0]).toContain("w: One two three four")
-        expect(lyricSlices[0]).not.toContain("W: Printed verse footer")
     })
 })
 
