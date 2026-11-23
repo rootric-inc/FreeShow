@@ -18,6 +18,13 @@ const RENDER_OPTIONS = {
     pageMarginRight: 50
 }
 
+const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
+
+function countSvgSystems(svg) {
+    const matches = svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g)
+    return matches ? matches.length : 0
+}
+
 const MAX_CANONICAL_MEMO = 8
 const canonicalMemo = new Map()
 
@@ -175,23 +182,31 @@ export async function handleMessage(message) {
 
         try {
             const renderAt = (width) => {
-                // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
-                tk.resetOptions()
-                tk.resetXmlIdSeed(1)
-                const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, pageWidth: width }
-                tk.setOptions(renderOptions)
-                tk.getLog()
-                const loaded = tk.loadData(renderMei)
-                if (!loaded) {
+                const runLayout = (minLastJustification) => {
+                    // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
+                    tk.resetOptions()
+                    tk.resetXmlIdSeed(1)
+                    const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, minLastJustification, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                    tk.setOptions(renderOptions)
+                    tk.getLog()
+                    const loaded = tk.loadData(renderMei)
+                    if (!loaded) {
+                        lastRenderLog = tk.getLog().trim()
+                        throw createWorkerError("render_failed", "Could not render music")
+                    }
+
+                    const svg = tk.renderToSVG(1)
                     lastRenderLog = tk.getLog().trim()
-                    throw createWorkerError("render_failed", "Could not render music")
+                    if (!svg) throw createWorkerError("render_failed", "Could not render music")
+                    const pages = tk.getPageCount()
+                    return { svg, pages }
                 }
 
-                const svg = tk.renderToSVG(1)
-                lastRenderLog = tk.getLog().trim()
-                if (!svg) throw createWorkerError("render_failed", "Could not render music")
-                const pages = tk.getPageCount()
-                return { svg, pages }
+                const initial = runLayout(RENDER_OPTIONS.minLastJustification)
+                if (initial.pages > 1 || countSvgSystems(initial.svg) > 1) {
+                    return runLayout(MULTI_ROW_MIN_LAST_JUSTIFICATION)
+                }
+                return initial
             }
 
             if (targetRatio === null) {

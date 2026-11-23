@@ -15,11 +15,12 @@
     import MaterialButton from "../../inputs/MaterialButton.svelte"
     import MaterialTextInput from "../../inputs/MaterialTextInput.svelte"
     import { getLoadedAbcjs } from "../../slide/views/sheetMusic/abcjs"
-    import { normalizeLineEndings } from "../../slide/views/sheetMusic/abcSource"
+    import type { AbcHeaderInfo, AbcPartsLayout } from "../../slide/views/sheetMusic/abcSource"
+    import { normalizeLineEndings, readAbcHeader } from "../../slide/views/sheetMusic/abcSource"
     import type { AbcAnalysisResult } from "../../slide/views/sheetMusic/abcToMei"
     import { convertAndCheckAbc } from "../../slide/views/sheetMusic/abcToMei"
     import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic, sliceMusic } from "../../slide/views/sheetMusic/engine"
-    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicSize, hasHiddenInitialMeter, mergeSheetMusicOwnedFields, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
+    import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicSize, mergeSheetMusicOwnedFields, prefixSvgIds, shouldHideInitialMeterForEdit } from "../../slide/views/sheetMusic/helpers"
     import { getMeasureNumbers } from "../../slide/views/sheetMusic/meiParts"
     import { formatMeasureRange, resolveMeasureRange } from "../../slide/views/sheetMusic/parts"
     import Tabs from "../Tabs.svelte"
@@ -66,7 +67,7 @@
     $: currentAbc = getSheetMusicAbc(current)
     $: currentLabel = getSheetMusicLabel(current)
     $: currentMeasures = getSheetMusicMeasures(current)
-    $: hideInitialMeter = hasHiddenInitialMeter(currentData)
+    $: hideInitialMeter = shouldHideInitialMeterForEdit(current)
     $: previewPageWidth = calculatePageWidth(1530, getSheetMusicSize(current))
 
     let activeTab: PopupTab = getSheetMusicData(current) && !getSheetMusicAbc(current) ? "file" : "type"
@@ -74,6 +75,10 @@
 
     let text = normalizeLineEndings(getSheetMusicAbc(current))
     let lastSavedAbc = text
+    const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
+    let selectedKey = initialHeader.key
+    let selectedMeter = initialHeader.meter
+    let selectedParts: AbcPartsLayout = initialHeader.parts
 
     let openedFileMei = ""
     let openedFileLabel = ""
@@ -171,7 +176,7 @@
         if (!analysis) {
             const abcjs = getLoadedAbcjs()
             if (!abcjs) return
-            analysis = convertAndCheckAbc(normalized, abcjs.parseOnly, { hideInitialMeter: hasHiddenInitialMeter(getSheetMusicData(current)) })
+            analysis = convertAndCheckAbc(normalized, abcjs.parseOnly, { hideInitialMeter: shouldHideInitialMeterForEdit(current) })
         }
         if (!analysis.mei || analysis.hasError) return
 
@@ -400,7 +405,7 @@
     <Tabs tabs={popupTabs} bind:active={activeTab} labels style="font-weight: normal;" />
 
     {#if activeTab === "type"}
-        <AbcEditor bind:text pageWidth={previewPageWidth} {hideInitialMeter} svgIdPrefix={SVG_ID_PREFIX} on:result={handleAbcResult}>
+        <AbcEditor bind:text bind:selectedKey bind:selectedMeter bind:selectedParts pageWidth={previewPageWidth} {hideInitialMeter} svgIdPrefix={SVG_ID_PREFIX} on:result={handleAbcResult}>
             {#if currentData && !currentAbc && !text.trim()}
                 <p class="notice"><T id="sheet_music.type_replaces_file" /></p>
             {/if}

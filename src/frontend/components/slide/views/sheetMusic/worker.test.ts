@@ -483,4 +483,36 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         const drawnNumbers = [...numberedRender.svg.matchAll(/<g[^>]*class="[^"]*\bmNum\b[^"]*"[^>]*>[\s\S]*?<\/g>/g)].map((match) => match[0].replace(/<[^>]+>/g, "").trim())
         expect(drawnNumbers).toEqual(Array.from({ length: 16 }, (_, i) => String(i + 1)))
     })
+
+    it("fills the full width on a one-row drawing and leaves a short last row natural on a two-row drawing (F1)", async () => {
+        const makeBar = (n: number) => `<measure n="${n}"><staff n="1"><layer n="1"><note dur="4" oct="4" pname="c"/><note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="e"/><note dur="4" oct="4" pname="f"/></layer></staff></measure>`
+        const makeMei = (barCount: number) => `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section>${Array.from({ length: barCount }, (_, i) => makeBar(i + 1)).join("")}</section></score></mdiv></body></music></mei>`
+
+        const getLastSystemBarlineRight = (svg: string) => {
+            const systems = svg.split(/<g\b[^>]*\bclass="[^"]*\bsystem\b[^"]*"[^>]*>/)
+            const lastSystem = systems[systems.length - 1]
+            const innerVb = svg.match(/class="definition-scale"[^>]*viewBox="0 0 (\d+)/)
+            const marginMatch = svg.match(/class="page-margin"[^>]*transform="translate\((\d+)/)
+            const innerWidth = innerVb ? Number(innerVb[1]) : 0
+            const marginX = marginMatch ? Number(marginMatch[1]) : 0
+            const usableRight = innerWidth - 2 * marginX
+            let maxX = 0
+            for (const match of lastSystem.matchAll(/d="M(\d+)\s+\d+\s+L(\d+)\s+\d+"/g)) {
+                maxX = Math.max(maxX, Number(match[1]), Number(match[2]))
+            }
+            return { systemCount: systems.length - 1, maxX, usableRight }
+        }
+
+        // One-row drawing (2 bars at wide pageWidth) fills the full usable width
+        const oneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840 })
+        const oneRowStats = getLastSystemBarlineRight(oneRow.svg)
+        expect(oneRowStats.systemCount).toBe(1)
+        expect(oneRowStats.maxX).toBeGreaterThan(oneRowStats.usableRight * 0.95)
+
+        // Two-row drawing with a short last row (5 bars at width 1200 -> 4 bars on row 1, 1 bar on row 2) ends well before the right edge
+        const twoRows = await handleMessage({ type: "render", mei: makeMei(5), pageWidth: 1200 })
+        const twoRowStats = getLastSystemBarlineRight(twoRows.svg)
+        expect(twoRowStats.systemCount).toBe(2)
+        expect(twoRowStats.maxX).toBeLessThan(twoRowStats.usableRight * 0.75)
+    })
 })

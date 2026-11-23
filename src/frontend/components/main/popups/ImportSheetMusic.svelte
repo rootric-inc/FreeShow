@@ -7,8 +7,8 @@
     import { ToMain } from "../../../../types/IPC/ToMain"
     import type { TabsObj } from "../../../../types/Tabs"
     import { setTempShows } from "../../../converters/importHelpers"
-    import type { AbcSystemSlice, MeasureSliceRange, SheetMusicImportParts, SheetMusicImportSlide, SheetMusicMetadata, SheetMusicSlideGrouping, SheetMusicVerseMode } from "../../../converters/sheetMusic"
-    import { SHEET_MUSIC_ITEM_STYLE, buildSheetMusicShow, extractAbcMetadata, extractKeyFromMei, getFileSlideRanges, getFirstSlideVerses, hasMeiLineBreaks, sliceAbcIntoSystems } from "../../../converters/sheetMusic"
+    import type { SheetMusicImportParts, SheetMusicImportSlide, SheetMusicMetadata, SheetMusicVerseMode } from "../../../converters/sheetMusic"
+    import { SHEET_MUSIC_ITEM_STYLE, buildSheetMusicShow, getFirstSlideVerses } from "../../../converters/sheetMusic"
     import { destroyMain, receiveToMain, sendMain } from "../../../IPC/main"
     import { drawerTabsData } from "../../../stores"
     import { translateText } from "../../../utils/language"
@@ -20,11 +20,16 @@
     import MaterialButton from "../../inputs/MaterialButton.svelte"
     import MaterialDropdown from "../../inputs/MaterialDropdown.svelte"
     import { getLoadedAbcjs } from "../../slide/views/sheetMusic/abcjs"
+    import type { AbcSystemSlice } from "../../slide/views/sheetMusic/abcSlice"
+    import { extractAbcMetadata, extractAbcTextVerses, sliceAbcIntoSystems } from "../../slide/views/sheetMusic/abcSlice"
+    import type { AbcPartsLayout } from "../../slide/views/sheetMusic/abcSource"
     import { normalizeLineEndings } from "../../slide/views/sheetMusic/abcSource"
     import type { AbcAnalysisResult } from "../../slide/views/sheetMusic/abcToMei"
     import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic, sliceMusic } from "../../slide/views/sheetMusic/engine"
     import { MAX_NOTATION_SIZE, decodeBase64Text, getItemRatioFromStyle, getPageWidthFromStyle, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
     import { filterMei, getMeasureNumbers, summarizeMei } from "../../slide/views/sheetMusic/meiParts"
+    import type { MeasureSliceRange, SheetMusicSlideGrouping } from "../../slide/views/sheetMusic/meiRead"
+    import { extractKeyFromMei, getFileSlideRanges, hasMeiLineBreaks } from "../../slide/views/sheetMusic/meiRead"
     import { formatMeasureRange, resolvePartsSelection, resolveVersesSelection } from "../../slide/views/sheetMusic/parts"
     import Tabs from "../Tabs.svelte"
     import AbcEditor from "./sheetMusic/AbcEditor.svelte"
@@ -38,10 +43,10 @@
     const FIRST_SLIDE_PAGE_WIDTH = getPageWidthFromStyle(SHEET_MUSIC_ITEM_STYLE, MAX_NOTATION_SIZE)
     const FIRST_SLIDE_RATIO = getItemRatioFromStyle(SHEET_MUSIC_ITEM_STYLE)
 
-    const popupTabs: TabsObj = {
-        type: { name: "sheet_music.tab_type_or_paste", icon: "edit" },
-        file: { name: "sheet_music.tab_file", icon: "folder" }
-    }
+    $: popupTabs = {
+        type: { name: "sheet_music.tab_type_or_paste", icon: "edit", disabled: importing },
+        file: { name: "sheet_music.tab_file", icon: "folder", disabled: importing }
+    } as TabsObj
 
     const partsOptions: DropdownOptions = [
         { value: "all", label: translateText("sheet_music.parts_all") },
@@ -57,10 +62,14 @@
 
     let activeTab: ImportTab = "type"
     let text = ""
+    let abcKey = "Eb"
+    let abcMeter = "4/4"
+    let abcParts: AbcPartsLayout = "four"
     let abcFileName = ""
     let abcAnalysis: AbcAnalysisResult | null = null
     let abcSlices: AbcSystemSlice[] = []
     let abcVerses: number[] = []
+    let abcTextVerses: string[][] = []
     let abcPending = false
 
     let openedFileMei = ""
@@ -101,9 +110,11 @@
     $: hasValidFile = Boolean(openedFileMei && !loadingFile && fileRanges.length > 0)
     $: hasValidMusic = activeTab === "type" ? hasValidAbc : hasValidFile
     $: activeVerses = activeTab === "type" ? (hasValidAbc ? abcVerses : []) : hasValidFile ? openedFileVerses : []
+    $: activeTextVerses = activeTab === "type" && hasValidAbc ? abcTextVerses : []
     $: slidesPerGroup = activeTab === "type" ? (hasValidAbc ? abcSlices.length : 0) : hasValidFile ? fileRanges.length : 0
-    $: effectiveGroupCount = hasValidMusic ? (verseMode === "per_verse" && activeVerses.length > 1 ? activeVerses.length : 1) : 0
-    $: totalSlideCount = slidesPerGroup * effectiveGroupCount
+    $: notationGroupCount = hasValidMusic ? (verseMode === "per_verse" && activeVerses.length > 1 ? activeVerses.length : 1) : 0
+    $: effectiveGroupCount = hasValidMusic ? notationGroupCount + activeTextVerses.length : 0
+    $: totalSlideCount = hasValidMusic ? slidesPerGroup * notationGroupCount + activeTextVerses.length : 0
 
     $: if (!verseModeTouched && hasValidMusic) {
         verseMode = activeVerses.length > 1 ? "per_verse" : "all"
@@ -197,6 +208,7 @@
         if (!convertedText.trim() || !analysis || analysis.hasError || !analysis.mei) {
             abcSlices = []
             abcVerses = []
+            abcTextVerses = []
             return
         }
 
@@ -204,11 +216,13 @@
         if (!abcjs) {
             abcSlices = []
             abcVerses = []
+            abcTextVerses = []
             return
         }
 
         abcSlices = sliceAbcIntoSystems(convertedText, abcjs.parseOnly)
         abcVerses = summarizeMei(analysis.mei).verses
+        abcTextVerses = extractAbcTextVerses(convertedText)
     }
 
     async function handleFile(filePath: string, rawBase64: string) {
@@ -336,27 +350,41 @@
         importing = true
         importError = ""
 
+        // Snapshot every user choice once when Import is pressed so later UI changes cannot alter the show
+        const snapshotTab = activeTab
+        const snapshotParts = selectedParts
+        const snapshotVerseMode = verseMode
+        const snapshotVerses = [...activeVerses]
+        const snapshotTextVerses = snapshotTab === "type" ? abcTextVerses.map((verse) => [...verse]) : []
+        const snapshotAbcSlices = abcSlices.map((slice) => ({ mei: slice.analysis.mei, abc: slice.abc }))
+        const snapshotAbcText = text
+        const snapshotAbcTitle = abcAnalysis?.title || ""
+        const snapshotAbcFileName = abcFileName
+        const snapshotFileMei = openedFileMei
+        const snapshotFileRanges = fileRanges.map((range) => ({ ...range }))
+        const snapshotFileTitle = openedFileTitle
+        const snapshotFileComposer = openedFileComposer
+        const snapshotFileLyricist = openedFileLyricist
+        const snapshotFileCopyright = openedFileCopyright
+        const snapshotFileName = openedFileName
+
         try {
             let importSlides: SheetMusicImportSlide[] = []
             let metadata: SheetMusicMetadata = {}
             let title = ""
             let fallbackFileName = ""
 
-            if (activeTab === "type") {
-                importSlides = abcSlices.map((slice) => ({
-                    mei: slice.analysis.mei,
-                    abc: slice.abc
-                }))
-                metadata = extractAbcMetadata(text)
-                title = (abcAnalysis?.title || metadata.title || "").trim()
-                fallbackFileName = abcFileName
+            if (snapshotTab === "type") {
+                importSlides = snapshotAbcSlices
+                metadata = extractAbcMetadata(snapshotAbcText)
+                title = (snapshotAbcTitle || metadata.title || "").trim()
+                fallbackFileName = snapshotAbcFileName
             } else {
-                const ranges = fileRanges
-                for (const range of ranges) {
-                    const cacheKey = `${openedFileMei}:${range.first}-${range.last}`
+                for (const range of snapshotFileRanges) {
+                    const cacheKey = `${snapshotFileMei}:${range.first}-${range.last}`
                     let slicedMei = slicedRangeCache.get(cacheKey)
                     if (!slicedMei) {
-                        const sliced = await sliceMusic(openedFileMei, range.first, range.last, controller.signal)
+                        const sliced = await sliceMusic(snapshotFileMei, range.first, range.last, controller.signal)
                         if (destroyed) return
                         slicedMei = sliced.mei
                         slicedRangeCache.set(cacheKey, sliced.mei)
@@ -369,15 +397,15 @@
                     })
                 }
 
-                if (openedFileTitle) metadata.title = openedFileTitle
-                if (openedFileComposer) metadata.composer = openedFileComposer
-                if (openedFileLyricist) metadata.author = openedFileLyricist
-                if (openedFileCopyright) metadata.copyright = openedFileCopyright
-                const detectedKey = extractKeyFromMei(openedFileMei)
+                if (snapshotFileTitle) metadata.title = snapshotFileTitle
+                if (snapshotFileComposer) metadata.composer = snapshotFileComposer
+                if (snapshotFileLyricist) metadata.author = snapshotFileLyricist
+                if (snapshotFileCopyright) metadata.copyright = snapshotFileCopyright
+                const detectedKey = extractKeyFromMei(snapshotFileMei)
                 if (detectedKey) metadata.key = detectedKey
 
-                title = openedFileTitle
-                fallbackFileName = openedFileName
+                title = snapshotFileTitle
+                fallbackFileName = snapshotFileName
             }
 
             if (destroyed || !importSlides.length) return
@@ -393,9 +421,10 @@
                 category,
                 layoutName: translateText("example.default"),
                 slides: importSlides,
-                verseMode,
-                verseNumbers: activeVerses,
-                parts: selectedParts,
+                verseMode: snapshotVerseMode,
+                verseNumbers: snapshotVerses,
+                parts: snapshotParts,
+                textVerses: snapshotTextVerses,
                 metadata
             })
 
@@ -416,7 +445,7 @@
     <Tabs tabs={popupTabs} bind:active={activeTab} labels style="font-weight: normal;" />
 
     {#if activeTab === "type"}
-        <AbcEditor bind:text svgIdPrefix="sm_import_abc_" on:result={handleAbcResult} on:pending={handleAbcPending} />
+        <AbcEditor bind:text bind:selectedKey={abcKey} bind:selectedMeter={abcMeter} bind:selectedParts={abcParts} disabled={importing} svgIdPrefix="sm_import_abc_" on:result={handleAbcResult} on:pending={handleAbcPending} />
     {:else}
         <InputRow>
             <MaterialButton variant="outlined" icon="music" disabled={loadingFile || importing} on:click={openFile} style="flex: 1;">
@@ -435,18 +464,19 @@
 
     <div class="showOptions">
         <InputRow>
-            <MaterialDropdown label="sheet_music.parts" value={selectedParts} options={partsOptions} on:change={(e) => (selectedParts = e.detail)} />
+            <MaterialDropdown label="sheet_music.parts" value={selectedParts} options={partsOptions} disabled={importing} on:change={(e) => (selectedParts = e.detail)} />
             <MaterialDropdown
                 label="sheet_music.verses"
                 value={verseMode}
                 options={versesOptions}
+                disabled={importing}
                 on:change={(e) => {
                     verseModeTouched = true
                     verseMode = e.detail
                 }}
             />
             {#if activeTab === "file"}
-                <MaterialDropdown label="sheet_music.import_slides" value={slideGrouping} options={slideOptions} on:change={(e) => (slideGrouping = e.detail)} />
+                <MaterialDropdown label="sheet_music.import_slides" value={slideGrouping} options={slideOptions} disabled={importing} on:change={(e) => (slideGrouping = e.detail)} />
             {/if}
         </InputRow>
 

@@ -93,6 +93,10 @@ export function hasHiddenInitialMeter(mei: string): boolean {
     return false
 }
 
+export function shouldHideInitialMeterForEdit(sheetMusic: unknown): boolean {
+    return Boolean(getSheetMusicAbc(sheetMusic)) && hasHiddenInitialMeter(getSheetMusicData(sheetMusic))
+}
+
 export function getSheetMusicDisplayLabel(sheetMusic: unknown): string {
     const label = getSheetMusicLabel(sheetMusic)
     const measures = getSheetMusicMeasures(sheetMusic).trim()

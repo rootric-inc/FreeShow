@@ -287,6 +287,26 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
         for (let measureOffset = 0; measureOffset < measureCount; measureOffset++) {
             const measureXml: string[] = []
             const topMeasure = parsedVoices[0] && parsedVoices[0][0] && parsedVoices[0][0][measureOffset]
+            const hasAnyEvent = parsedVoices.some((staffVoices) => staffVoices.some((measures) => (measures[measureOffset]?.events.length ?? 0) > 0))
+            if (!hasAnyEvent) {
+                if (topMeasure && topMeasure.change) {
+                    if (topMeasure.change.key) {
+                        pendingKey = topMeasure.change.key
+                        pendingKeyFromPrimary = true
+                    }
+                    if (topMeasure.change.meter) {
+                        pendingMeter = topMeasure.change.meter
+                        pendingMeterFromPrimary = true
+                    }
+                }
+                parsedVoices.forEach((staffVoices, staffIndex) => {
+                    const firstVoiceMeasure = staffVoices[0] && staffVoices[0][measureOffset]
+                    if (firstVoiceMeasure && firstVoiceMeasure.change && firstVoiceMeasure.change.clef && firstVoiceMeasure.change.clef.type) {
+                        pendingClefs[staffIndex] = firstVoiceMeasure.change.clef.type
+                    }
+                })
+                continue
+            }
             let nextKey: KeySignature | undefined
             let nextMeter: Meter | undefined
             if (pendingKey) {
@@ -318,27 +338,33 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
 
             let scoreDefAttrs = ""
             if (nextKey) {
+                const nextKeySig = formatKeySignature(nextKey)
+                const keyChanged = nextKeySig !== currentKey
                 applyKey(nextKey)
-                scoreDefAttrs += ` keysig="${currentKey}"`
+                if (keyChanged) scoreDefAttrs += ` keysig="${currentKey}"`
             }
             if (nextMeter) {
+                const nextMeterAttrs = formatMeterAttrs(nextMeter)
+                const meterChanged = nextMeterAttrs !== currentMeterAttrs
                 currentMeter = nextMeter
-                currentMeterAttrs = formatMeterAttrs(currentMeter)
-                scoreDefAttrs += currentMeterAttrs
+                currentMeterAttrs = nextMeterAttrs
+                if (meterChanged) scoreDefAttrs += currentMeterAttrs
             }
             if (scoreDefAttrs) measureXml.push(`<scoreDef${scoreDefAttrs}/>`)
 
             const measureKeyAccidentals = { ...keyAccidentals }
             const rightBar = topMeasure && topMeasure.barType ? RIGHT_BAR_TYPES[topMeasure.barType] || "" : "invis"
             const leftBar = topMeasure && topMeasure.leftBarType === "bar_left_repeat" ? "rptstart" : topMeasure && topMeasure.leftBarType === "bar_thick_thin" ? "dbl" : ""
-            measureXml.push(`<measure n="${measureNumberOffset + measureOffset + 1}"${leftBar ? ` left="${leftBar}"` : ""}${rightBar ? ` right="${rightBar}"` : ""}${currentMeter ? "" : ` metcon="false"`}>`)
+            measureNumberOffset++
+            measureXml.push(`<measure n="${measureNumberOffset}"${leftBar ? ` left="${leftBar}"` : ""}${rightBar ? ` right="${rightBar}"` : ""}${currentMeter ? "" : ` metcon="false"`}>`)
 
             const bufferIndex = measureBuffers.length
             parsedVoices.forEach((staffVoices, staffIndex) => {
                 measureXml.push(`<staff n="${staffIndex + 1}">`)
                 const lineClef = measureOffset === 0 && lineIndex > 0 && line.staff[staffIndex] && line.staff[staffIndex].clef ? line.staff[staffIndex].clef.type : undefined
                 const firstVoiceMeasure = staffVoices[0] && staffVoices[0][measureOffset]
-                const newClef = (firstVoiceMeasure && firstVoiceMeasure.change && firstVoiceMeasure.change.clef && firstVoiceMeasure.change.clef.type) || pendingClefs[staffIndex] || (lineClef && lineClef !== currentClefs[staffIndex] ? lineClef : undefined)
+                const candidateClef = (firstVoiceMeasure && firstVoiceMeasure.change && firstVoiceMeasure.change.clef && firstVoiceMeasure.change.clef.type) || pendingClefs[staffIndex] || lineClef
+                const newClef = candidateClef && candidateClef !== currentClefs[staffIndex] ? candidateClef : undefined
                 pendingClefs[staffIndex] = undefined
 
                 const declaredCount = expectedVoiceCounts[staffIndex] ?? staffVoices.length
@@ -517,7 +543,6 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string, decl
             measureXml.push("</measure>")
             measureBuffers.push(measureXml)
         }
-        measureNumberOffset += measureCount
     })
 
     for (const [, range] of Array.from(droppedDecorationsByLine.entries()).sort((a, b) => a[0] - b[0])) {

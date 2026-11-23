@@ -237,7 +237,9 @@ export function formatText(text: string, showId = "", itemIndex = 0) {
             // only if text content is the same ??
             // skip when itemIndex > 0: the newly parsed items must be preserved
             slide = clone(show.slides[slideId])
+            delete slide.id
             newSlides[slideId] = slide
+            return
         } else if (parentStyles[slideId]) {
             // newly split and created slide
             // add same style as parent

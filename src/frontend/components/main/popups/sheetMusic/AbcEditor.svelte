@@ -41,6 +41,10 @@
     export let pageWidth = calculatePageWidth(1530, undefined)
     export let hideInitialMeter = false
     export let svgIdPrefix = "sm_popup_"
+    export let disabled = false
+    export let selectedKey = "Eb"
+    export let selectedMeter = "4/4"
+    export let selectedParts: AbcPartsLayout = "four"
 
     const NOTE_ID_SUFFIX_PATTERN = /^c(\d+)(?:-\d+|_\w+)?$/
 
@@ -52,10 +56,12 @@
     let loadedAbcjs: AbcjsGlobal | null = getLoadedAbcjs()
     let applyingProgrammaticEdit = false
 
-    const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
-    let selectedKey = initialHeader.key
-    let selectedMeter = initialHeader.meter
-    let selectedParts: AbcPartsLayout = initialHeader.parts
+    if (text.trim()) {
+        const initialHeader: AbcHeaderInfo = readAbcHeader(text)
+        selectedKey = initialHeader.key
+        selectedMeter = initialHeader.meter
+        selectedParts = initialHeader.parts
+    }
     let confirmReplace = false
 
     let textareaEl: HTMLTextAreaElement | null = null
@@ -169,8 +175,7 @@
             truncated = false
             loading = false
             error = ""
-            previewSvg = ""
-            hasAbcError = false
+            hasAbcError = Boolean(previewSvg)
             applyHighlight("")
             dispatch("result", { text: "", analysis: null, userEdit })
             return
@@ -301,6 +306,7 @@
     }
 
     function changeHeader(field: "K" | "M", value: string) {
+        if (disabled) return
         if (field === "K") selectedKey = value
         else selectedMeter = value
 
@@ -310,11 +316,13 @@
     }
 
     function handleNewHymnClick() {
+        if (disabled) return
         if (text.trim()) confirmReplace = true
         else applyNewHymn()
     }
 
     async function applyNewHymn() {
+        if (disabled) return
         confirmReplace = false
         const template = createAbcTemplate({ key: selectedKey, meter: selectedMeter, parts: selectedParts })
         replaceTextareaRange(0, text.length, template)
@@ -331,7 +339,7 @@
     }
 
     function handleTextInput() {
-        if (applyingProgrammaticEdit) return
+        if (applyingProgrammaticEdit || disabled) return
         lastHandledText = text
         confirmReplace = false
         syncHeader(text)
@@ -340,6 +348,7 @@
     }
 
     async function handleInsertSnippet(event: CustomEvent<string>) {
+        if (disabled) return
         const snippet = event.detail
         if (!snippet) return
 
@@ -415,21 +424,21 @@
 <slot />
 
 <InputRow>
-    <MaterialDropdown label="sheet_music.key" value={selectedKey} options={keyOptions} on:change={(e) => changeHeader("K", e.detail)} />
-    <MaterialDropdown label="sheet_music.time" value={selectedMeter} options={meterOptions} on:change={(e) => changeHeader("M", e.detail)} />
-    <MaterialDropdown label="sheet_music.parts" value={selectedParts} options={partsOptions} on:change={(e) => (selectedParts = e.detail)} />
-    <MaterialButton variant="outlined" icon="add" on:click={handleNewHymnClick} style="flex: 0 0 auto;"><T id="sheet_music.new_hymn" /></MaterialButton>
+    <MaterialDropdown label="sheet_music.key" value={selectedKey} options={keyOptions} {disabled} on:change={(e) => changeHeader("K", e.detail)} />
+    <MaterialDropdown label="sheet_music.time" value={selectedMeter} options={meterOptions} {disabled} on:change={(e) => changeHeader("M", e.detail)} />
+    <MaterialDropdown label="sheet_music.parts" value={selectedParts} options={partsOptions} {disabled} on:change={(e) => (selectedParts = e.detail)} />
+    <MaterialButton variant="outlined" icon="add" {disabled} on:click={handleNewHymnClick} style="flex: 0 0 auto;"><T id="sheet_music.new_hymn" /></MaterialButton>
 </InputRow>
 
 {#if confirmReplace}
     <div class="confirmBar">
         <span><T id="sheet_music.replace_confirm" /></span>
         <div class="confirmActions">
-            <MaterialButton variant="outlined" small on:click={() => (confirmReplace = false)}>
+            <MaterialButton variant="outlined" small {disabled} on:click={() => (confirmReplace = false)}>
                 <Icon id="close" style="fill: #ff5454;" size={1.1} white />
                 <T id="main.no" />
             </MaterialButton>
-            <MaterialButton variant="outlined" small on:click={applyNewHymn}>
+            <MaterialButton variant="outlined" small {disabled} on:click={applyNewHymn}>
                 <Icon id="check" style="fill: #b7ffac;" size={1.1} white />
                 <T id="main.yes" />
             </MaterialButton>
@@ -439,11 +448,11 @@
 
 <div class="textfield">
     <div class="background" />
-    <textarea bind:this={textareaEl} bind:value={text} class="input edit abcInput" rows={10} wrap="off" spellcheck={false} placeholder={translateText("sheet_music.abc_placeholder")} on:input={handleTextInput} on:click={updateHighlight} on:keyup={updateHighlight} on:select={updateHighlight} />
+    <textarea bind:this={textareaEl} bind:value={text} class="input edit abcInput" {disabled} rows={10} wrap="off" spellcheck={false} placeholder={translateText("sheet_music.abc_placeholder")} on:input={handleTextInput} on:click={updateHighlight} on:keyup={updateHighlight} on:select={updateHighlight} />
     <span class="underline" />
 </div>
 
-<AbcReference on:insert={handleInsertSnippet} />
+<AbcReference {disabled} on:insert={handleInsertSnippet} />
 
 <AbcProblemList {problems} on:select={handleSelectProblem} />
 

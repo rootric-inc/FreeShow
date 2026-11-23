@@ -100,6 +100,8 @@
         }
     ]
 
+    export let disabled = false
+
     const dispatch = createEventDispatcher<{ insert: string }>()
 
     function getEntryTitle(entry: ReferenceEntry): string {
@@ -125,7 +127,7 @@
                         <span class="sub"><T id={row.subtitleKey} /></span>
                     {/if}
                     {#each row.entries as entry}
-                        <button type="button" class="chip" title={getEntryTitle(entry)} on:click={() => dispatch("insert", entry.insertText)}>
+                        <button type="button" class="chip" {disabled} title={getEntryTitle(entry)} on:click={() => !disabled && dispatch("insert", entry.insertText)}>
                             <code>{entry.insertText}</code>
                             {#if "labelKey" in entry}
                                 <span><T id={entry.labelKey} /></span>
