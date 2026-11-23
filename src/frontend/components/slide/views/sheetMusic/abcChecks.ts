@@ -77,6 +77,7 @@ interface AlignedVoice {
     endChar: number
     intervals: PitchInterval[]
     hasNotes: boolean
+    hasMeasure: boolean
 }
 
 interface AlignedBar {
@@ -97,6 +98,7 @@ interface CarriedVoiceMeasure {
     leftBarType: string | undefined
     intervals: PitchInterval[]
     hasNotes: boolean
+    hasMeasure: boolean
 }
 
 interface CrossingMatch {
@@ -109,6 +111,7 @@ type LyricTokenKind = "syllable" | "hold" | "skip" | "bar"
 
 interface LyricToken {
     kind: LyricTokenKind
+    text: string
     startChar: number
     endChar: number
 }
@@ -144,14 +147,14 @@ export function makeAbcProblem(kind: string, values: string[], startChar: number
     }
 }
 
-export function parseAbcTune(abc: string, parseOnly: AbcParseOnly): TuneObject | undefined {
+export function parseAbcTunes(abc: string, parseOnly: AbcParseOnly): TuneObject[] {
     const normalized = normalizeLineEndings(abc)
-    if (!normalized.trim()) return undefined
+    if (!normalized.trim()) return []
     try {
         const parsed = parseOnly(normalized)
-        return parsed && parsed[0]
+        return Array.isArray(parsed) ? parsed.filter((item): item is TuneObject => Boolean(item)) : []
     } catch {
-        return undefined
+        return []
     }
 }
 
@@ -205,16 +208,125 @@ export function hasAbcNotes(tune: TuneObject | undefined): boolean {
     return getStaffLines(tune).some((line) => line.staff.some((staff) => (staff.voices || []).some((voice) => (voice as RawAbcElem[]).some((element) => element.el_type === "note" && !element.rest && Boolean(element.pitches && element.pitches.length)))))
 }
 
-export function getAbcParts(tune: TuneObject | undefined): AbcPartInfo[] {
+function isMusicSourceLine(trimmed: string, inTextBlock: boolean): boolean {
+    return !inTextBlock && trimmed !== "" && !trimmed.startsWith("%") && !/^[A-Za-z]:/.test(trimmed)
+}
+
+export function findSecondTuneLine(sourceLines: string[]): number {
+    let inTextBlock = false
+    let firstTuneStarted = false
+    for (let index = 0; index < sourceLines.length; index++) {
+        const trimmed = sourceLines[index].trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
+        }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (firstTuneStarted && /^X:/.test(trimmed)) return index
+        firstTuneStarted = true
+    }
+    return -1
+}
+
+function parseScoreDirective(spec: string): number[] {
+    const counts: number[] = []
+    let cursor = 0
+    while (cursor < spec.length) {
+        const openIndex = spec.indexOf("(", cursor)
+        const outside = openIndex >= 0 ? spec.slice(cursor, openIndex) : spec.slice(cursor)
+        const standalone = outside
+            .replace(/[{}[\]|*+]/g, " ")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+        for (const token of standalone) {
+            if (token) counts.push(1)
+        }
+        if (openIndex < 0) break
+        const closeIndex = spec.indexOf(")", openIndex + 1)
+        const groupText = closeIndex >= 0 ? spec.slice(openIndex + 1, closeIndex) : spec.slice(openIndex + 1)
+        const groupVoices = groupText
+            .replace(/[{}[\]|*+]/g, " ")
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+        if (groupVoices.length) counts.push(groupVoices.length)
+        cursor = closeIndex >= 0 ? closeIndex + 1 : spec.length
+    }
+    return counts
+}
+
+export function getDeclaredStaffVoices(normalized: string, secondTuneLine = -1): number[] {
+    const sourceLines = normalized.split("\n")
+    const endLine = secondTuneLine >= 0 ? secondTuneLine : sourceLines.length
+    const voices = new Set<string>()
+    let inTextBlock = false
+    let seenMusic = false
+
+    for (let index = 0; index < endLine; index++) {
+        const line = sourceLines[index]
+        const trimmed = line.trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
+        }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (inTextBlock || !trimmed) continue
+
+        if (!seenMusic) {
+            const scoreMatch = /^\s*%%(?:score|staves)\s+(.+)$/i.exec(line)
+            if (scoreMatch) {
+                const parsed = parseScoreDirective(scoreMatch[1].replace(/%.*/, "").trim())
+                if (parsed.length) return parsed
+            }
+        }
+
+        if (trimmed.startsWith("%")) continue
+        const cleanLine = line.replace(/(?<!\\)%.*$/, "").trim()
+        const voiceHeader = /^V:\s*([^\s]+)/.exec(cleanLine)
+        if (voiceHeader) {
+            voices.add(voiceHeader[1])
+            continue
+        }
+        if (isMusicSourceLine(trimmed, false)) {
+            seenMusic = true
+            for (const inlineMatch of cleanLine.match(/\[V:\s*([^\s\]]+)/g) || []) {
+                voices.add(inlineMatch.replace(/^\[V:\s*/, ""))
+            }
+        }
+    }
+
+    return voices.size > 0 ? Array(voices.size).fill(1) : [1]
+}
+
+export function getExpectedVoiceCounts(firstStaves: Staff[], declaredStaffVoices?: number[]): number[] {
+    return firstStaves.map((staff, staffIndex) => {
+        const actualCount = (staff.voices || []).length
+        if (declaredStaffVoices && declaredStaffVoices[staffIndex] !== undefined) {
+            return Math.min(declaredStaffVoices[staffIndex], actualCount)
+        }
+        return actualCount
+    })
+}
+
+export function getAbcParts(tune: TuneObject | undefined, declaredStaffVoices?: number[]): AbcPartInfo[] {
     const lines = getStaffLines(tune)
     if (!lines.length) return []
     const firstStaves = lines[0].staff
-    const isSatb = firstStaves.length === 2 && firstStaves[0].voices && firstStaves[0].voices.length === 2 && firstStaves[1].voices && firstStaves[1].voices.length === 2
+    const expectedCounts = getExpectedVoiceCounts(firstStaves, declaredStaffVoices)
+    const isSatb = firstStaves.length === 2 && expectedCounts[0] === 2 && expectedCounts[1] === 2
     const parts: AbcPartInfo[] = []
     let partIndex = 0
     firstStaves.forEach((staff, staffIndex) => {
         const titles = (staff as Staff & { title?: string[] }).title
-        const voiceCount = staff.voices ? staff.voices.length : 0
+        const voiceCount = expectedCounts[staffIndex]
         for (let voiceIndex = 0; voiceIndex < voiceCount; voiceIndex++, partIndex++) {
             const customTitle = Array.isArray(titles) && titles[voiceIndex] ? titles[voiceIndex].trim() : ""
             parts.push({
@@ -455,6 +567,7 @@ function collectAlignedBars(tune: TuneObject, normalized: string): AlignedBar[] 
                         lastVoiceRange.set(voiceKey, { startChar: current.startChar, endChar: current.endChar })
                     }
 
+                    const hasMeasure = Boolean(current || (previous && previous.hasMeasure))
                     return {
                         staffIndex,
                         voiceIndex,
@@ -462,7 +575,8 @@ function collectAlignedBars(tune: TuneObject, normalized: string): AlignedBar[] 
                         startChar,
                         endChar,
                         intervals,
-                        hasNotes: Boolean((current && current.hasNotes) || (previous && previous.hasNotes))
+                        hasNotes: Boolean((current && current.hasNotes) || (previous && previous.hasNotes)),
+                        hasMeasure
                     }
                 })
             )
@@ -477,7 +591,8 @@ function collectAlignedBars(tune: TuneObject, normalized: string): AlignedBar[] 
                             endChar: firstDefinedNumber(currentMeasure && currentMeasure.endChar, voice.endChar),
                             leftBarType: currentMeasure ? currentMeasure.leftBarType : undefined,
                             intervals: voice.intervals,
-                            hasNotes: voice.hasNotes
+                            hasNotes: voice.hasNotes,
+                            hasMeasure: voice.hasMeasure
                         }
                     })
                 )
@@ -543,51 +658,139 @@ function checkSyntaxWarnings(tune: TuneObject | undefined, mapper: OffsetMapper)
     return problems
 }
 
-function checkBlankLines(tune: TuneObject, mapper: OffsetMapper): AbcProblem[] {
-    const lines = getStaffLines(tune)
-    if (!lines.length) return []
-    const normalized = mapper.normalized
-    const lineStarts = getLineStarts(normalized)
-    let firstMusicLine = Infinity
-    for (const line of lines) {
+function findEarliestTuneOffset(tune: TuneObject, normalized: string): number {
+    let earliest = Infinity
+    const metaInfo = (tune as TuneObject & { metaTextInfo?: Record<string, { startChar?: number }> }).metaTextInfo
+    if (metaInfo) {
+        for (const info of Object.values(metaInfo)) {
+            if (info && typeof info.startChar === "number" && Number.isFinite(info.startChar)) {
+                earliest = Math.min(earliest, info.startChar)
+            }
+        }
+    }
+    for (const line of getStaffLines(tune)) {
         for (const staff of line.staff) {
             for (const voice of staff.voices || []) {
                 for (const element of voice as RawAbcElem[]) {
                     if (element.startChar !== undefined && element.el_type !== "stem") {
-                        firstMusicLine = Math.min(firstMusicLine, getLineIndexAt(lineStarts, trimCharRange(normalized, element.startChar, element.endChar).startChar))
+                        earliest = Math.min(earliest, trimCharRange(normalized, element.startChar, element.endChar).startChar)
                     }
                 }
             }
         }
     }
-    if (!Number.isFinite(firstMusicLine)) return []
+    return Number.isFinite(earliest) ? earliest : 0
+}
+
+function checkMultipleTunes(tunes: TuneObject[], mapper: OffsetMapper, secondTuneLine: number): AbcProblem[] {
+    if (tunes.length <= 1) return []
+    const normalized = mapper.normalized
+    const lineStarts = getLineStarts(normalized)
+    const targetLine = secondTuneLine >= 0 ? secondTuneLine : getLineIndexAt(lineStarts, findEarliestTuneOffset(tunes[1], normalized))
+    const startOffset = lineStarts[targetLine] || 0
+    const endOffset = targetLine + 1 < lineStarts.length ? lineStarts[targetLine + 1] - 1 : normalized.length
+    return [makeAbcProblem("multiple_tunes", [], mapper.toOriginal(startOffset), mapper.toOriginal(endOffset))]
+}
+
+function hasMusicLineAfter(sourceLines: string[], startIndex: number, endLine: number): boolean {
+    let inTextBlock = false
+    for (let index = startIndex; index < endLine; index++) {
+        const trimmed = sourceLines[index].trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
+        }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (isMusicSourceLine(trimmed, inTextBlock)) return true
+    }
+    return false
+}
+
+function checkBlankLines(tune: TuneObject | undefined, mapper: OffsetMapper, secondTuneLine: number, severity: AbcProblemSeverity): AbcProblem[] {
+    const normalized = mapper.normalized
+    const lineStarts = getLineStarts(normalized)
     const sourceLines = normalized.split("\n")
-    for (let index = firstMusicLine + 1; index < sourceLines.length; index++) {
-        if (sourceLines[index].trim() !== "") continue
-        const hasTrailingContent = sourceLines.slice(index + 1).some((line) => line.trim() !== "" && !/^\s*%/.test(line))
-        if (hasTrailingContent) {
+    const endLine = secondTuneLine >= 0 ? secondTuneLine : sourceLines.length
+
+    let scanStartLine = -1
+    if (tune && hasAbcNotes(tune)) {
+        let firstMusicLine = Infinity
+        for (const line of getStaffLines(tune)) {
+            for (const staff of line.staff) {
+                for (const voice of staff.voices || []) {
+                    for (const element of voice as RawAbcElem[]) {
+                        if (element.startChar !== undefined && element.el_type !== "stem") {
+                            firstMusicLine = Math.min(firstMusicLine, getLineIndexAt(lineStarts, trimCharRange(normalized, element.startChar, element.endChar).startChar))
+                        }
+                    }
+                }
+            }
+        }
+        if (!Number.isFinite(firstMusicLine)) return []
+        scanStartLine = firstMusicLine + 1
+    } else {
+        let inHeaderTextBlock = false
+        let xLine = -1
+        let firstContentLine = -1
+        for (let index = 0; index < endLine; index++) {
+            const trimmed = sourceLines[index].trim()
+            if (/^%%begintext\b/i.test(trimmed)) {
+                inHeaderTextBlock = true
+                continue
+            }
+            if (/^%%endtext\b/i.test(trimmed)) {
+                inHeaderTextBlock = false
+                continue
+            }
+            if (inHeaderTextBlock || !trimmed || trimmed.startsWith("%")) continue
+            if (firstContentLine < 0) firstContentLine = index
+            if (xLine < 0 && /^X:/.test(trimmed)) {
+                xLine = index
+                break
+            }
+        }
+        const headerStartLine = xLine >= 0 ? xLine : firstContentLine
+        if (headerStartLine < 0) return []
+        scanStartLine = headerStartLine + 1
+    }
+
+    let inTextBlock = false
+    for (let index = 0; index < endLine; index++) {
+        const trimmed = sourceLines[index].trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
+        }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (inTextBlock || index < scanStartLine) continue
+        if (trimmed !== "") continue
+        if (hasMusicLineAfter(sourceLines, index + 1, endLine)) {
             const startOffset = lineStarts[index]
             const endOffset = index + 1 < lineStarts.length ? lineStarts[index + 1] : normalized.length
-            return [makeAbcProblem("blank_line", [], mapper.toOriginal(startOffset), mapper.toOriginal(endOffset))]
+            return [makeAbcProblem("blank_line", [], mapper.toOriginal(startOffset), mapper.toOriginal(endOffset), severity)]
         }
         break
     }
     return []
 }
 
-function checkMissingParts(tune: TuneObject, mapper: OffsetMapper): AbcProblem[] {
+function checkMissingParts(tune: TuneObject, mapper: OffsetMapper, expectedVoiceCounts: number[]): AbcProblem[] {
     const lines = getStaffLines(tune)
     if (lines.length <= 1) return []
     const normalized = mapper.normalized
     const lineStarts = getLineStarts(normalized)
-    const firstStaves = lines[0].staff
-    const expectedStaffCount = firstStaves.length
-    const expectedVoiceCounts = firstStaves.map((staff) => (staff.voices || []).length)
+    const expectedStaffCount = expectedVoiceCounts.length
     const problems: AbcProblem[] = []
 
     for (let lineIndex = 1; lineIndex < lines.length; lineIndex++) {
         const staves = lines[lineIndex].staff
-        let missing = staves.length < expectedStaffCount
+        let missing = staves.length !== expectedStaffCount
         if (!missing) {
             for (let staffIndex = 0; staffIndex < expectedStaffCount; staffIndex++) {
                 if ((staves[staffIndex].voices || []).length < expectedVoiceCounts[staffIndex]) {
@@ -616,6 +819,67 @@ function checkMissingParts(tune: TuneObject, mapper: OffsetMapper): AbcProblem[]
     return problems
 }
 
+function findAmpersandOnLine(lineText: string, lineStart: number, beforeOffset: number): number {
+    let inQuote = false
+    let escaped = false
+    let lastMatch = -1
+    let firstMatch = -1
+    for (let index = 0; index < lineText.length; index++) {
+        const ch = lineText[index]
+        if (!inQuote && !escaped && ch === "%") break
+        if (!escaped && ch === '"') {
+            inQuote = !inQuote
+        } else if (!inQuote && !escaped && ch === "&") {
+            const absOffset = lineStart + index
+            if (firstMatch < 0) firstMatch = absOffset
+            if (absOffset <= beforeOffset) lastMatch = absOffset
+        }
+        escaped = ch === "\\" && !escaped
+    }
+    return lastMatch >= 0 ? lastMatch : firstMatch
+}
+
+function checkOverlayCorruption(tune: TuneObject, mapper: OffsetMapper, expectedVoiceCounts: number[]): AbcProblem[] {
+    const lines = getStaffLines(tune)
+    if (!lines.length) return []
+    const normalized = mapper.normalized
+    const lineStarts = getLineStarts(normalized)
+    const sourceLines = normalized.split("\n")
+    const problems: AbcProblem[] = []
+    const reportedOffsets = new Set<number>()
+
+    for (const line of lines) {
+        line.staff.forEach((staff, staffIndex) => {
+            const declaredCount = expectedVoiceCounts[staffIndex] ?? 0
+            const voices = staff.voices || []
+            if (voices.length <= declaredCount) return
+
+            const seenNoteStarts = new Set<number>()
+            for (let voiceIndex = 0; voiceIndex < voices.length; voiceIndex++) {
+                const voice = voices[voiceIndex] as RawAbcElem[]
+                const voiceStarts: number[] = []
+                for (const element of voice) {
+                    if (element.el_type !== "note" || (element.rest && element.rest.type === "invisible") || element.startChar === undefined) continue
+                    const start = trimCharRange(normalized, element.startChar, element.endChar).startChar
+                    if (voiceIndex >= declaredCount && seenNoteStarts.has(start)) {
+                        const sourceLine = getLineIndexAt(lineStarts, start)
+                        const ampOffset = findAmpersandOnLine(sourceLines[sourceLine] || "", lineStarts[sourceLine] || 0, start)
+                        const targetOffset = ampOffset >= 0 ? ampOffset : start
+                        if (!reportedOffsets.has(targetOffset)) {
+                            reportedOffsets.add(targetOffset)
+                            problems.push(makeAbcProblem("overlay_unsupported", [], mapper.toOriginal(targetOffset), mapper.toOriginal(Math.min(normalized.length, targetOffset + 1)), "error"))
+                        }
+                        break
+                    }
+                    voiceStarts.push(start)
+                }
+                for (const start of voiceStarts) seenNoteStarts.add(start)
+            }
+        })
+    }
+    return problems
+}
+
 function getPartName(parts: AbcPartInfo[], staffIndex: number, voiceIndex: number): string {
     const found = parts.find((part) => part.staff === staffIndex + 1 && part.layer === voiceIndex + 1)
     return found ? found.name : `Voice ${voiceIndex + 1}`
@@ -637,17 +901,103 @@ function majorityLength(values: number[]): number {
     return bestValue
 }
 
-function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: AbcPartInfo[]): AbcProblem[] {
+function majorityInteger(values: number[]): number {
+    let bestValue = values[0]
+    let bestCount = 0
+    for (const candidate of values) {
+        let count = 0
+        for (const value of values) {
+            if (value === candidate) count++
+        }
+        if (count > bestCount) {
+            bestCount = count
+            bestValue = candidate
+        }
+    }
+    return bestValue
+}
+
+function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: AbcPartInfo[], expectedVoiceCounts: number[]): AbcProblem[] {
     const problems: AbcProblem[] = []
+    const isDeclaredVoice = (staffIndex: number, voiceIndex: number) => voiceIndex < (expectedVoiceCounts[staffIndex] ?? Infinity)
     const activeVoices = new Set<string>()
+    const activeVoiceOrder: { key: string; staffIndex: number; voiceIndex: number }[] = []
+
     for (const bar of bars) {
         for (const staffVoices of bar.voices) {
             for (const voice of staffVoices) {
-                if (voice.hasNotes || voice.length > 1e-4) activeVoices.add(`${voice.staffIndex}.${voice.voiceIndex}`)
+                if (!isDeclaredVoice(voice.staffIndex, voice.voiceIndex)) continue
+                const voiceKey = `${voice.staffIndex}.${voice.voiceIndex}`
+                if ((voice.hasNotes || voice.length > 1e-4) && !activeVoices.has(voiceKey)) {
+                    activeVoices.add(voiceKey)
+                    activeVoiceOrder.push({ key: voiceKey, staffIndex: voice.staffIndex, voiceIndex: voice.voiceIndex })
+                }
             }
         }
     }
     if (!activeVoices.size) return problems
+
+    if (activeVoiceOrder.length >= 2) {
+        const barCounts = new Map<string, number>()
+        for (const entry of activeVoiceOrder) barCounts.set(entry.key, 0)
+        for (const bar of bars) {
+            for (const voice of bar.voices.flat()) {
+                const voiceKey = `${voice.staffIndex}.${voice.voiceIndex}`
+                if (activeVoices.has(voiceKey) && voice.hasMeasure) {
+                    barCounts.set(voiceKey, (barCounts.get(voiceKey) || 0) + 1)
+                }
+            }
+        }
+
+        const countValues = activeVoiceOrder.map((entry) => barCounts.get(entry.key) || 0)
+        const expectedBarCount = majorityInteger(countValues)
+        const halfActive = activeVoiceOrder.length / 2
+
+        for (const entry of activeVoiceOrder) {
+            const partBarCount = barCounts.get(entry.key) || 0
+            if (partBarCount === expectedBarCount) continue
+
+            let targetRange: { startChar: number; endChar: number } | null = null
+            if (partBarCount > expectedBarCount) {
+                let seenForPart = 0
+                let fallbackRange: { startChar: number; endChar: number } | null = null
+                for (const bar of bars) {
+                    const partVoices = bar.voices.flat().filter((voice) => activeVoices.has(`${voice.staffIndex}.${voice.voiceIndex}`))
+                    const partVoice = partVoices.find((voice) => voice.staffIndex === entry.staffIndex && voice.voiceIndex === entry.voiceIndex)
+                    if (!partVoice || !partVoice.hasMeasure) continue
+                    seenForPart++
+                    if (seenForPart === expectedBarCount + 1 && !fallbackRange) {
+                        fallbackRange = { startChar: partVoice.startChar, endChar: partVoice.endChar }
+                    }
+                    const missingCount = partVoices.filter((voice) => !voice.hasMeasure).length
+                    if (missingCount > halfActive) {
+                        targetRange = { startChar: partVoice.startChar, endChar: partVoice.endChar }
+                        break
+                    }
+                }
+                if (!targetRange) targetRange = fallbackRange
+            } else {
+                let lastPresent: { startChar: number; endChar: number } | null = null
+                for (const bar of bars) {
+                    const partVoice = bar.voices.flat().find((voice) => voice.staffIndex === entry.staffIndex && voice.voiceIndex === entry.voiceIndex)
+                    if (partVoice && partVoice.hasMeasure) {
+                        lastPresent = { startChar: partVoice.startChar, endChar: partVoice.endChar }
+                    } else if (lastPresent) {
+                        targetRange = lastPresent
+                        break
+                    }
+                }
+                if (!targetRange) targetRange = lastPresent
+            }
+
+            const partName = getPartName(parts, entry.staffIndex, entry.voiceIndex)
+            const rangeStart = targetRange ? targetRange.startChar : 0
+            const rangeEnd = targetRange ? targetRange.endChar : 0
+            const problemKey = partBarCount === 1 ? "part_bars_one" : "part_bars"
+            const values = partBarCount === 1 ? [partName, String(expectedBarCount)] : [partName, String(partBarCount), String(expectedBarCount)]
+            problems.push(makeAbcProblem(problemKey, values, mapper.toOriginal(rangeStart), mapper.toOriginal(rangeEnd)))
+        }
+    }
 
     const splitOkKeys = new Set<string>()
     for (let index = 0; index + 1 < bars.length; index++) {
@@ -657,9 +1007,10 @@ function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: Ab
         if (firstBar.barLength === null || nextBar.barLength !== firstBar.barLength) continue
         const expectedBarLength = firstBar.barLength
         for (const firstVoice of firstBar.voices.flat()) {
+            if (!firstVoice.hasMeasure || !isDeclaredVoice(firstVoice.staffIndex, firstVoice.voiceIndex)) continue
             const voiceKey = `${firstVoice.staffIndex}.${firstVoice.voiceIndex}`
             const nextVoice = nextBar.voices.flat().find((voice) => voice.staffIndex === firstVoice.staffIndex && voice.voiceIndex === firstVoice.voiceIndex)
-            if (!nextVoice) continue
+            if (!nextVoice || !nextVoice.hasMeasure) continue
             if (firstVoice.length > 1e-4 && nextVoice.length > 1e-4 && firstVoice.length < expectedBarLength - 1e-4 && nextVoice.length < expectedBarLength - 1e-4 && Math.abs(firstVoice.length + nextVoice.length - expectedBarLength) <= 1e-4) {
                 splitOkKeys.add(`${index}:${voiceKey}`)
                 splitOkKeys.add(`${index + 1}:${voiceKey}`)
@@ -672,7 +1023,7 @@ function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: Ab
         const firstBarLength = bars[0].barLength
         for (const voice of bars[0].voices.flat()) {
             const voiceKey = `${voice.staffIndex}.${voice.voiceIndex}`
-            if (activeVoices.has(voiceKey) && voice.length > 1e-4 && voice.length < firstBarLength - 1e-4) {
+            if (voice.hasMeasure && activeVoices.has(voiceKey) && voice.length > 1e-4 && voice.length < firstBarLength - 1e-4) {
                 pickupLengthByVoice.set(voiceKey, voice.length)
             }
         }
@@ -685,7 +1036,7 @@ function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: Ab
     }
 
     bars.forEach((bar, barIndex) => {
-        const entries = bar.voices.flat().filter((voice) => activeVoices.has(`${voice.staffIndex}.${voice.voiceIndex}`))
+        const entries = bar.voices.flat().filter((voice) => voice.hasMeasure && isDeclaredVoice(voice.staffIndex, voice.voiceIndex) && activeVoices.has(`${voice.staffIndex}.${voice.voiceIndex}`))
         if (!entries.length) return
 
         if (bar.barLength === null) {
@@ -719,16 +1070,26 @@ function checkMeasuresOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: Ab
         }
 
         const expectedBeats = formatBeats(expectedBarLength, bar.meter)
-        for (const voice of entries) {
+        const mismatched = entries.filter((voice) => {
             const voiceKey = `${voice.staffIndex}.${voice.voiceIndex}`
-            if (splitOkKeys.has(`${barIndex}:${voiceKey}`)) continue
+            if (splitOkKeys.has(`${barIndex}:${voiceKey}`)) return false
             if (bar.isLast && voice.length > 1e-4 && voice.length < expectedBarLength - 1e-4) {
                 const pickupLength = pickupLengthByVoice.get(voiceKey)
-                if (pickupLength !== undefined && Math.abs(pickupLength + voice.length - expectedBarLength) <= 1e-4) continue
+                if (pickupLength !== undefined && Math.abs(pickupLength + voice.length - expectedBarLength) <= 1e-4) return false
             }
-            if (Math.abs(voice.length - expectedBarLength) > 1e-4) {
-                pushBeatsProblem("bar_beats_meter", getPartName(parts, voice.staffIndex, voice.voiceIndex), bar.barNumber, formatBeats(voice.length, bar.meter), expectedBeats, voice.startChar, voice.endChar)
-            }
+            return Math.abs(voice.length - expectedBarLength) > 1e-4
+        })
+
+        if (entries.length > 1 && mismatched.length === entries.length && entries.every((voice) => Math.abs(voice.length - entries[0].length) <= 1e-4)) {
+            const gotBeats = formatBeats(entries[0].length, bar.meter)
+            const problemKey = gotBeats === "1" ? "bar_beats_all_one" : "bar_beats_all"
+            const values = gotBeats === "1" ? [String(bar.barNumber), expectedBeats] : [String(bar.barNumber), gotBeats, expectedBeats]
+            problems.push(makeAbcProblem(problemKey, values, mapper.toOriginal(entries[0].startChar), mapper.toOriginal(entries[0].endChar)))
+            return
+        }
+
+        for (const voice of mismatched) {
+            pushBeatsProblem("bar_beats_meter", getPartName(parts, voice.staffIndex, voice.voiceIndex), bar.barNumber, formatBeats(voice.length, bar.meter), expectedBeats, voice.startChar, voice.endChar)
         }
     })
 
@@ -764,7 +1125,7 @@ function findVoiceCrossing(upperIntervals: PitchInterval[], lowerIntervals: Pitc
     return { crossed: overlapDuration > 0 && crossedDuration > overlapDuration / 2, startChar, endChar }
 }
 
-function checkVoiceOrderOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: AbcPartInfo[]): AbcProblem[] {
+function checkVoiceOrderOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: AbcPartInfo[], expectedVoiceCounts: number[]): AbcProblem[] {
     const problems: AbcProblem[] = []
     for (const bar of bars) {
         const barNumberText = String(bar.barNumber)
@@ -774,7 +1135,8 @@ function checkVoiceOrderOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: 
         }
 
         bar.voices.forEach((staffVoices, staffIndex) => {
-            if (staffVoices.length >= 2) {
+            const declaredCount = Math.min(staffVoices.length, expectedVoiceCounts[staffIndex] ?? staffVoices.length)
+            if (declaredCount >= 2) {
                 const match = findVoiceCrossing(staffVoices[0].intervals, staffVoices[1].intervals, 0)
                 if (match.crossed) {
                     flaggedVoices.add(`${staffIndex}.1`)
@@ -785,13 +1147,15 @@ function checkVoiceOrderOnBars(bars: AlignedBar[], mapper: OffsetMapper, parts: 
 
         const upperIsNonBass = !((bar.staves[0] && bar.staves[0].clef && bar.staves[0].clef.type) || "treble").startsWith("bass")
         const lowerIsBass = Boolean(bar.staves[1] && bar.staves[1].clef && bar.staves[1].clef.type && bar.staves[1].clef.type.startsWith("bass"))
-        if (bar.staves.length >= 2 && bar.voices[0].length && upperIsNonBass && lowerIsBass) {
-            const upperBottomVoiceIndex = bar.voices[0].length - 1
-            bar.voices[1].forEach((bassVoice, voiceIndex) => {
-                if (flaggedVoices.has(`1.${voiceIndex}`)) return
-                const match = findVoiceCrossing(bar.voices[0][upperBottomVoiceIndex].intervals, bassVoice.intervals, ALTO_TENOR_CROSSING_SEMITONES)
+        const upperDeclaredCount = bar.voices[0] ? Math.min(bar.voices[0].length, expectedVoiceCounts[0] ?? bar.voices[0].length) : 0
+        const lowerDeclaredCount = bar.voices[1] ? Math.min(bar.voices[1].length, expectedVoiceCounts[1] ?? bar.voices[1].length) : 0
+        if (bar.staves.length >= 2 && upperDeclaredCount > 0 && lowerDeclaredCount > 0 && upperIsNonBass && lowerIsBass) {
+            const upperBottomVoiceIndex = upperDeclaredCount - 1
+            for (let voiceIndex = 0; voiceIndex < lowerDeclaredCount; voiceIndex++) {
+                if (flaggedVoices.has(`1.${voiceIndex}`)) continue
+                const match = findVoiceCrossing(bar.voices[0][upperBottomVoiceIndex].intervals, bar.voices[1][voiceIndex].intervals, ALTO_TENOR_CROSSING_SEMITONES)
                 if (match.crossed) pushCrossing(1, voiceIndex, 0, upperBottomVoiceIndex, match.startChar, match.endChar)
-            })
+            }
         }
     }
     return problems
@@ -810,7 +1174,7 @@ function tokenizeLyrics(content: string, offset: number): LyricToken[] {
         const body = segment.trim()
         const bodyStart = segmentStart + segment.indexOf(body)
         segmentStart = endIndex + 1
-        if (body) tokens.push({ kind: "syllable", startChar: offset + bodyStart, endChar: offset + bodyStart + body.length })
+        if (body) tokens.push({ kind: "syllable", text: body, startChar: offset + bodyStart, endChar: offset + bodyStart + body.length })
         return Boolean(body)
     }
 
@@ -819,10 +1183,10 @@ function tokenizeLyrics(content: string, offset: number): LyricToken[] {
         if (ch === " " || ch === "\t") {
             flushSegment(index)
         } else if (!escaped && ch === "-") {
-            if (!flushSegment(index) && tokens.length) tokens.push({ kind: "skip", startChar: offset + index, endChar: offset + index + 1 })
+            if (!flushSegment(index) && tokens.length) tokens.push({ kind: "skip", text: ch, startChar: offset + index, endChar: offset + index + 1 })
         } else if (!escaped && (ch === "_" || ch === "*" || ch === "|")) {
             flushSegment(index)
-            tokens.push({ kind: ch === "|" ? "bar" : ch === "_" ? "hold" : "skip", startChar: offset + index, endChar: offset + index + 1 })
+            tokens.push({ kind: ch === "|" ? "bar" : ch === "_" ? "hold" : "skip", text: ch, startChar: offset + index, endChar: offset + index + 1 })
         }
         escaped = ch === "\\" && !escaped
     }
@@ -931,9 +1295,7 @@ function checkLyrics(tune: TuneObject, mapper: OffsetMapper): AbcProblem[] {
                     let itemIndex = 0
                     let notesCovered = 0
                     let syllableCount = 0
-                    let overflowCount = 0
-                    let overflowStart = -1
-                    let overflowEnd = -1
+                    let firstOverflowSyllable: LyricToken | null = null
 
                     for (const token of tokens) {
                         if (token.kind === "bar") {
@@ -947,19 +1309,17 @@ function checkLyrics(tune: TuneObject, mapper: OffsetMapper): AbcProblem[] {
                             if (itemIndex < items.length) {
                                 notesCovered++
                                 itemIndex++
-                            } else {
-                                overflowCount++
-                                if (overflowStart < 0) overflowStart = token.startChar
-                                overflowEnd = token.endChar
+                            } else if (token.kind === "syllable" && !firstOverflowSyllable) {
+                                firstOverflowSyllable = token
                             }
                         }
                     }
 
-                    if (overflowCount > 0 || notesCovered !== totalNotes) {
+                    if (firstOverflowSyllable) {
+                        problems.push(makeAbcProblem("syllables_overflow", [String(verseNumber), firstOverflowSyllable.text], mapper.toOriginal(firstOverflowSyllable.startChar), mapper.toOriginal(firstOverflowSyllable.endChar)))
+                    } else if (notesCovered < totalNotes) {
                         const scanLine = lyricLine.lineIndex
-                        const rangeStart = overflowStart < 0 ? lineStarts[scanLine] : overflowStart
-                        const rangeEnd = overflowEnd < 0 ? lineStarts[scanLine] + sourceLines[scanLine].length : overflowEnd
-                        problems.push(makeAbcProblem("syllables", [String(verseNumber), String(syllableCount), String(totalNotes)], mapper.toOriginal(rangeStart), mapper.toOriginal(rangeEnd)))
+                        problems.push(makeAbcProblem("syllables", [String(verseNumber), String(syllableCount), String(totalNotes)], mapper.toOriginal(lineStarts[scanLine]), mapper.toOriginal(lineStarts[scanLine] + sourceLines[scanLine].length)))
                     }
                 })
             }
@@ -968,18 +1328,29 @@ function checkLyrics(tune: TuneObject, mapper: OffsetMapper): AbcProblem[] {
     return problems
 }
 
-export function checkAbcTune(tune: TuneObject | undefined, abc: string, converterProblems: AbcProblem[] = []): AbcProblem[] {
+export function checkAbcTune(tunes: TuneObject[], abc: string, converterProblems: AbcProblem[] = []): AbcProblem[] {
+    const tune = tunes[0]
     const mapper = buildOffsetMapper(abc)
+    const sourceLines = mapper.normalized.split("\n")
+    const secondTuneLine = tunes.length > 1 ? findSecondTuneLine(sourceLines) : -1
     const problems: AbcProblem[] = []
+
     if (!tune || !hasAbcNotes(tune)) {
-        if (!converterProblems.some((problem) => problem.severity === "error")) {
+        const blankProblems = checkBlankLines(tune, mapper, secondTuneLine, "error")
+        if (blankProblems.length) {
+            problems.push(...blankProblems)
+        } else if (!converterProblems.some((problem) => problem.severity === "error")) {
             problems.push(makeAbcProblem("no_notes", [], 0, Math.min(abc.length, 1), "error"))
         }
-        problems.push(...checkSyntaxWarnings(tune, mapper), ...converterProblems)
+        const filteredConverterProblems = blankProblems.length ? converterProblems.filter((problem) => problem.key !== "sheet_music.problem_no_notes") : converterProblems
+        problems.push(...checkSyntaxWarnings(tune, mapper), ...checkMultipleTunes(tunes, mapper, secondTuneLine), ...filteredConverterProblems)
     } else {
-        const parts = getAbcParts(tune)
+        const lines = getStaffLines(tune)
+        const declaredStaffVoices = getDeclaredStaffVoices(mapper.normalized, secondTuneLine)
+        const expectedVoiceCounts = getExpectedVoiceCounts(lines[0].staff, declaredStaffVoices)
+        const parts = getAbcParts(tune, declaredStaffVoices)
         const bars = collectAlignedBars(tune, mapper.normalized)
-        problems.push(...checkSyntaxWarnings(tune, mapper), ...checkBlankLines(tune, mapper), ...checkMissingParts(tune, mapper), ...checkMeasuresOnBars(bars, mapper, parts), ...checkVoiceOrderOnBars(bars, mapper, parts), ...checkLyrics(tune, mapper), ...converterProblems)
+        problems.push(...checkSyntaxWarnings(tune, mapper), ...checkMultipleTunes(tunes, mapper, secondTuneLine), ...checkBlankLines(tune, mapper, secondTuneLine, "warning"), ...checkMissingParts(tune, mapper, expectedVoiceCounts), ...checkOverlayCorruption(tune, mapper, expectedVoiceCounts), ...checkMeasuresOnBars(bars, mapper, parts, expectedVoiceCounts), ...checkVoiceOrderOnBars(bars, mapper, parts, expectedVoiceCounts), ...checkLyrics(tune, mapper), ...converterProblems)
     }
 
     const seen = new Set<string>()
@@ -991,10 +1362,6 @@ export function checkAbcTune(tune: TuneObject | undefined, abc: string, converte
             return true
         })
         .sort((a, b) => (a.severity !== b.severity ? (a.severity === "error" ? -1 : 1) : a.startChar - b.startChar))
-}
-
-export function checkAbc(abc: string, parseOnly: AbcParseOnly, converterProblems: AbcProblem[] = []): AbcProblem[] {
-    return checkAbcTune(parseAbcTune(abc, parseOnly), abc, converterProblems)
 }
 
 function sameProblemValues(left: string[], right: string[]): boolean {

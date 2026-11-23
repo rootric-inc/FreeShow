@@ -14,11 +14,18 @@ const ABCJS_SCRIPT_SRC = "./assets/sheet-music/abcjs-basic-min.js"
 
 let loadPromise: Promise<AbcjsGlobal> | null = null
 
+export function getLoadedAbcjs(): AbcjsGlobal | null {
+    if (typeof window === "undefined") return null
+    const win = window as WindowWithAbcjs
+    return win.ABCJS && typeof win.ABCJS.parseOnly === "function" ? win.ABCJS : null
+}
+
 export function loadAbcjs(): Promise<AbcjsGlobal> {
     if (typeof window === "undefined" || typeof document === "undefined") return Promise.reject(new Error("No window"))
-    const win = window as WindowWithAbcjs
-    if (win.ABCJS && typeof win.ABCJS.parseOnly === "function") return Promise.resolve(win.ABCJS)
+    const loaded = getLoadedAbcjs()
+    if (loaded) return Promise.resolve(loaded)
     if (loadPromise) return loadPromise
+    const win = window as WindowWithAbcjs
 
     loadPromise = new Promise<AbcjsGlobal>((resolve, reject) => {
         const script = document.createElement("script")

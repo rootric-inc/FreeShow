@@ -45,7 +45,7 @@ export function readAbcHeader(abc: string): AbcHeaderInfo {
 
     for (const line of normalizeLineEndings(abc).split("\n")) {
         const cleanLine = line.split("%")[0].trim()
-        if (!hasMeter && cleanLine.startsWith("M:")) {
+        if (!hasMeter && !hasKey && cleanLine.startsWith("M:")) {
             const rawMeter = cleanLine.slice(2).trim()
             const tokenMatch = METER_TOKEN_PATTERN.exec(rawMeter)
             const token = tokenMatch ? tokenMatch[0] : rawMeter.split(/\s+/)[0]
@@ -80,6 +80,25 @@ export function readAbcHeader(abc: string): AbcHeaderInfo {
     return { key, meter, parts: parts || (voices.size >= 3 ? "four" : voices.size === 2 ? "two" : "one") }
 }
 
+function findHeaderEnd(lines: string[]): number {
+    let inTextBlock = false
+    for (let index = 0; index < lines.length; index++) {
+        const trimmed = lines[index].trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
+        }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (/^K:/.test(trimmed)) return index
+        if (!/^[A-Za-z]:/.test(trimmed)) return index - 1
+    }
+    return lines.length - 1
+}
+
 function replaceHeaderToken(field: "K" | "M", valuePart: string, replacement: string): string {
     if (!valuePart) return replacement
     const tokenPattern = field === "K" ? KEY_TOKEN_PATTERN : METER_TOKEN_PATTERN
@@ -93,8 +112,9 @@ export function updateAbcHeaderField(abc: string, field: "K" | "M", value: strin
     if (!cleanValue) return abc
     const lineEnding = abc.includes("\r\n") ? "\r\n" : "\n"
     const lines = normalizeLineEndings(abc).split("\n")
+    const headerEnd = findHeaderEnd(lines)
     const linePattern = new RegExp(`^(\\s*${field}:\\s*)([^%\\n]*?)(\\s*%.*)?$`)
-    for (let index = 0; index < lines.length; index++) {
+    for (let index = 0; index <= headerEnd; index++) {
         const match = linePattern.exec(lines[index])
         if (match) {
             const updatedValue = replaceHeaderToken(field, match[2], cleanValue)
@@ -103,19 +123,26 @@ export function updateAbcHeaderField(abc: string, field: "K" | "M", value: strin
         }
     }
 
+    const headerLines = lines.slice(0, headerEnd + 1)
     let insertIndex = 0
     if (field === "M") {
-        const beforeLengthOrKey = lines.findIndex((line) => /^\s*(?:L|K):/.test(line))
-        const afterTitle = lines.findIndex((line) => /^\s*T:/.test(line))
+        const beforeLengthOrKey = headerLines.findIndex((line) => /^\s*(?:L|K):/.test(line))
+        const afterTitle = headerLines.findIndex((line) => /^\s*T:/.test(line))
         insertIndex = beforeLengthOrKey >= 0 ? beforeLengthOrKey : afterTitle >= 0 ? afterTitle + 1 : 0
     } else {
-        for (let index = 0; index < lines.length; index++) {
+        for (let index = 0; index <= headerEnd; index++) {
             if (/^\s*(?:[XTMLCQZ]:|%%)/.test(lines[index])) insertIndex = index + 1
             else if (lines[index].trim() && !/^\s*%/.test(lines[index])) break
         }
     }
     lines.splice(insertIndex, 0, `${field}: ${cleanValue}`)
     return lines.join(lineEnding)
+}
+
+export function adjustCursorForEdit(position: number, editStart: number, editEnd: number, replacementLength: number): number {
+    if (position <= editStart) return position
+    if (position >= editEnd) return position + replacementLength - (editEnd - editStart)
+    return editStart + replacementLength
 }
 
 export function insertAbcAtCursor(abc: string, text: string, selectionStart: number, selectionEnd = selectionStart): AbcInsertResult {

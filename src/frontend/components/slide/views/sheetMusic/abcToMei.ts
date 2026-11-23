@@ -1,7 +1,8 @@
 import type { KeySignature, Meter, NotePitch, Staff, TuneObject } from "abcjs"
-import type { AbcPartInfo, AbcProblem, RawAbcElem } from "./abcChecks"
-import { buildOffsetMapper, checkAbcTune, collectHeldLyrics, getAbcParts, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, makeAbcProblem, parseAbcTune, splitVoiceIntoMeasures, trimCharRange } from "./abcChecks"
+import type { AbcPartInfo, AbcProblem, RawAbcElem, VoiceMeasure } from "./abcChecks"
+import { buildOffsetMapper, checkAbcTune, collectHeldLyrics, findSecondTuneLine, getAbcParts, getDeclaredStaffVoices, getExpectedVoiceCounts, getLineIndexAt, getLineStarts, getStaffLines, hasAbcNotes, makeAbcProblem, parseAbcTunes, splitVoiceIntoMeasures, trimCharRange } from "./abcChecks"
 import type { AbcParseOnly } from "./abcjs"
+import { normalizeLineEndings } from "./abcSource"
 
 export interface AbcNoteRange {
     id: string
@@ -126,22 +127,28 @@ function getSlurLabel(entry: { label?: number } | number): string | null {
     return entry && typeof entry.label === "number" ? String(entry.label) : null
 }
 
-export function convertTuneToMei(tune: TuneObject | undefined, abc: string): AbcToMeiResult {
+function hasVisibleMeasureContent(measure: VoiceMeasure | undefined): boolean {
+    if (!measure) return false
+    return measure.events.some((element) => element.el_type === "note" && !(element.rest && (element.rest.type === "invisible" || element.rest.type === "spacer")))
+}
+
+export function convertTuneToMei(tune: TuneObject | undefined, abc: string, declaredStaffVoices?: number[]): AbcToMeiResult {
     const mapper = buildOffsetMapper(abc)
     const normalized = mapper.normalized
     const meta = tune && (tune as TuneObject & { metaText?: { title?: string } }).metaText
     const title = meta && meta.title ? meta.title.trim() : ""
     if (!tune || !hasAbcNotes(tune)) {
-        return { mei: "", title, problems: [makeAbcProblem("no_notes", [], 0, Math.min(abc.length, 1), "error")], parts: [], noteRanges: [] }
+        return { mei: "", title, problems: [], parts: [], noteRanges: [] }
     }
 
     const lines = getStaffLines(tune)
-    const parts = getAbcParts(tune)
+    const firstStaves: Staff[] = lines[0].staff
+    const expectedVoiceCounts = getExpectedVoiceCounts(firstStaves, declaredStaffVoices)
+    const parts = getAbcParts(tune, declaredStaffVoices)
     const heldLyrics = collectHeldLyrics(tune, normalized)
     const lineStarts = getLineStarts(normalized)
     const problems: AbcProblem[] = []
     const droppedDecorationsByLine = new Map<number, { startChar: number; endChar: number }>()
-    const firstStaves: Staff[] = lines[0].staff
 
     let currentKey = ""
     let keyAccidentals: Record<string, string> = {}
@@ -155,7 +162,9 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
     let currentMeterAttrs = formatMeterAttrs(currentMeter)
     const currentClefs = firstStaves.map((staff) => (staff.clef && staff.clef.type) || "treble")
     let pendingKey: KeySignature | undefined
+    let pendingKeyFromPrimary = false
     let pendingMeter: Meter | undefined
+    let pendingMeterFromPrimary = false
     const pendingClefs: (string | undefined)[] = firstStaves.map(() => undefined)
 
     const staffDefinitions = firstStaves.map((staff, staffIndex) => `<staffDef n="${staffIndex + 1}" lines="5" ${formatClefAttrs(staff.clef && staff.clef.type)}/>`).join("")
@@ -166,6 +175,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
     const measureControls: Record<number, string[]> = {}
     const tiedAccidentals: Record<string, Record<string, string>> = {}
     const carriedBarAccidentals: Record<string, Record<string, string>> = {}
+    const carriedDisplayedAccidentals: Record<string, Record<string, string>> = {}
     const usedIds = new Set<string>()
     const noteRanges: AbcNoteRange[] = []
     const measureBuffers: string[][] = []
@@ -220,15 +230,18 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
         const heldVerses = heldLyrics.get(element)
         return (element.lyric || [])
             .map((lyric, verseIndex) => {
-                if (!lyric || (lyric.syllable === "" && lyric.divider === " ")) return ""
+                if (!lyric) return ""
+                const rawSyllable = typeof lyric.syllable === "string" ? lyric.syllable : ""
+                const hasText = rawSyllable.trim().length > 0
                 const verseKey = `${staffIndex}.${voiceIndex}.${verseIndex}`
                 const wasInWord = Boolean(inWordByVerse[verseKey])
                 const isDash = lyric.divider === "-"
                 const isHold = lyric.divider === "_" || Boolean(heldVerses && heldVerses.has(verseIndex))
+                if (!hasText && !isDash && !isHold) return ""
                 inWordByVerse[verseKey] = isDash
                 const wordPos = wasInWord && isDash ? "m" : wasInWord ? "t" : isDash ? "i" : ""
                 const connector = isDash ? "d" : isHold ? "u" : ""
-                return `<verse n="${verseIndex + 1}"><syl${wordPos ? ` wordpos="${wordPos}"` : ""}${connector ? ` con="${connector}"` : ""}>${escapeXml(lyric.syllable)}</syl></verse>`
+                return `<verse n="${verseIndex + 1}"><syl${wordPos ? ` wordpos="${wordPos}"` : ""}${connector ? ` con="${connector}"` : ""}>${hasText ? escapeXml(rawSyllable) : ""}</syl></verse>`
             })
             .join("")
     }
@@ -243,22 +256,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
         }
     }
 
-    const applyScoreChange = (key: KeySignature | undefined, meter: Meter | undefined, target: string[], onlyIfChanged: boolean) => {
-        if (key && (!onlyIfChanged || formatKeySignature(key) !== currentKey)) {
-            applyKey(key)
-            target.push(` keysig="${currentKey}"`)
-        }
-        if (meter && (!onlyIfChanged || formatMeterAttrs(meter) !== currentMeterAttrs)) {
-            currentMeter = meter
-            currentMeterAttrs = formatMeterAttrs(currentMeter)
-            target.push(currentMeterAttrs)
-        }
-    }
-
     lines.forEach((line, lineIndex) => {
-        const lineScoreChanges: string[] = []
-        if (lineIndex > 0 && line.staff[0]) applyScoreChange(line.staff[0].key, line.staff[0].meter, lineScoreChanges, true)
-
         const parsedVoices = line.staff.map((staff, staffIndex) =>
             (staff.voices || []).map((voice, voiceIndex) =>
                 splitVoiceIntoMeasures(
@@ -284,14 +282,46 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
         for (let measureOffset = 0; measureOffset < measureCount; measureOffset++) {
             const measureXml: string[] = []
             const topMeasure = parsedVoices[0] && parsedVoices[0][0] && parsedVoices[0][0][measureOffset]
-            const scoreDefAttrs = measureOffset === 0 ? [...lineScoreChanges] : []
-            if (pendingKey || pendingMeter) {
-                applyScoreChange(pendingKey, pendingMeter, scoreDefAttrs, false)
+            let nextKey: KeySignature | undefined
+            let nextMeter: Meter | undefined
+            if (pendingKey) {
+                nextKey = pendingKey
                 pendingKey = undefined
-                pendingMeter = undefined
+                pendingKeyFromPrimary = false
             }
-            if (topMeasure && topMeasure.change) applyScoreChange(topMeasure.change.key, topMeasure.change.meter, scoreDefAttrs, false)
-            if (scoreDefAttrs.length) measureXml.push(`<scoreDef${scoreDefAttrs.join("")}/>`)
+            if (pendingMeter) {
+                nextMeter = pendingMeter
+                pendingMeter = undefined
+                pendingMeterFromPrimary = false
+            }
+            if (measureOffset === 0 && lineIndex > 0 && line.staff[0]) {
+                const lineKey = line.staff[0].key
+                const baselineKey = nextKey ? formatKeySignature(nextKey) : currentKey
+                if (lineKey && formatKeySignature(lineKey) !== baselineKey) {
+                    nextKey = lineKey
+                }
+                const lineMeter = line.staff[0].meter
+                const baselineMeter = nextMeter ? formatMeterAttrs(nextMeter) : currentMeterAttrs
+                if (lineMeter && formatMeterAttrs(lineMeter) !== baselineMeter) {
+                    nextMeter = lineMeter
+                }
+            }
+            if (topMeasure && topMeasure.change) {
+                if (topMeasure.change.key) nextKey = topMeasure.change.key
+                if (topMeasure.change.meter) nextMeter = topMeasure.change.meter
+            }
+
+            let scoreDefAttrs = ""
+            if (nextKey) {
+                applyKey(nextKey)
+                scoreDefAttrs += ` keysig="${currentKey}"`
+            }
+            if (nextMeter) {
+                currentMeter = nextMeter
+                currentMeterAttrs = formatMeterAttrs(currentMeter)
+                scoreDefAttrs += currentMeterAttrs
+            }
+            if (scoreDefAttrs) measureXml.push(`<scoreDef${scoreDefAttrs}/>`)
 
             const measureKeyAccidentals = { ...keyAccidentals }
             const rightBar = topMeasure && topMeasure.barType ? RIGHT_BAR_TYPES[topMeasure.barType] || "" : "invis"
@@ -306,15 +336,26 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
                 const newClef = (firstVoiceMeasure && firstVoiceMeasure.change && firstVoiceMeasure.change.clef && firstVoiceMeasure.change.clef.type) || pendingClefs[staffIndex] || (lineClef && lineClef !== currentClefs[staffIndex] ? lineClef : undefined)
                 pendingClefs[staffIndex] = undefined
 
-                staffVoices.forEach((measures, voiceIndex) => {
+                const declaredCount = expectedVoiceCounts[staffIndex] ?? staffVoices.length
+                const emittedVoiceIndices: number[] = []
+                for (let voiceIndex = 0; voiceIndex < staffVoices.length; voiceIndex++) {
+                    if (voiceIndex < declaredCount || hasVisibleMeasureContent(staffVoices[voiceIndex][measureOffset])) {
+                        emittedVoiceIndices.push(voiceIndex)
+                    }
+                }
+
+                emittedVoiceIndices.forEach((voiceIndex, emittedIndex) => {
+                    const measures = staffVoices[voiceIndex]
                     const voiceKey = `${staffIndex}.${voiceIndex}`
-                    const barAccidentals: Record<string, string> = carriedBarAccidentals[voiceKey] ? { ...carriedBarAccidentals[voiceKey] } : {}
+                    const abcBarAccidentals: Record<string, string> = carriedBarAccidentals[voiceKey] ? { ...carriedBarAccidentals[voiceKey] } : {}
+                    const displayedBarAccidentals: Record<string, string> = carriedDisplayedAccidentals[voiceKey] ? { ...carriedDisplayedAccidentals[voiceKey] } : {}
                     let voiceKeyAccidentals: Record<string, string> = { ...measureKeyAccidentals }
+                    let midBarKeyChanged = false
                     const previousTied = tiedAccidentals[voiceKey] || {}
                     const nextTied: Record<string, string> = {}
-                    const stemAttr = staffVoices.length >= 2 ? ` stem.dir="${voiceIndex ? "down" : "up"}"` : ""
-                    measureXml.push(`<layer n="${voiceIndex + 1}">`)
-                    if (voiceIndex === 0 && newClef) {
+                    const stemAttr = emittedVoiceIndices.length >= 2 ? ` stem.dir="${emittedIndex ? "down" : "up"}"` : ""
+                    measureXml.push(`<layer n="${emittedIndex + 1}">`)
+                    if (emittedIndex === 0 && newClef) {
                         currentClefs[staffIndex] = newClef
                         measureXml.push(`<clef ${formatClefAttrs(newClef)}/>`)
                     }
@@ -343,15 +384,24 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
                     for (const element of currentMeasure ? currentMeasure.events : []) {
                         if (element.el_type === "key") {
                             voiceKeyAccidentals = getKeyAccidentalMap(element as unknown as KeySignature)
-                            for (const pitchKey of Object.keys(barAccidentals)) delete barAccidentals[pitchKey]
-                            if (staffIndex === 0 && voiceIndex === 0) pendingKey = element as unknown as KeySignature
-                            else if (!pendingKey) pendingKey = element as unknown as KeySignature
+                            for (const pitchKey of Object.keys(abcBarAccidentals)) delete abcBarAccidentals[pitchKey]
+                            midBarKeyChanged = true
+                            if (staffIndex === 0 && voiceIndex === 0) {
+                                pendingKey = element as unknown as KeySignature
+                                pendingKeyFromPrimary = true
+                            } else if (!pendingKeyFromPrimary) {
+                                pendingKey = element as unknown as KeySignature
+                            }
                             pushWarning("midbar_change", [], element)
                             continue
                         }
                         if (element.el_type === "meter") {
-                            if (staffIndex === 0 && voiceIndex === 0) pendingMeter = element as unknown as Meter
-                            else if (!pendingMeter) pendingMeter = element as unknown as Meter
+                            if (staffIndex === 0 && voiceIndex === 0) {
+                                pendingMeter = element as unknown as Meter
+                                pendingMeterFromPrimary = true
+                            } else if (!pendingMeterFromPrimary) {
+                                pendingMeter = element as unknown as Meter
+                            }
                             pushWarning("midbar_change", [], element)
                             continue
                         }
@@ -392,7 +442,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
                         }
 
                         const decorations = element.decoration || []
-                        const fermataAttr = decorations.includes("invertedfermata") ? ` fermata="below"` : decorations.includes("fermata") ? ` fermata="${voiceIndex === 1 ? "below" : "above"}"` : ""
+                        const fermataAttr = decorations.includes("invertedfermata") ? ` fermata="below"` : decorations.includes("fermata") ? ` fermata="${emittedIndex === 1 ? "below" : "above"}"` : ""
 
                         if (element.rest) {
                             if (element.rest.type === "multimeasure") {
@@ -419,9 +469,15 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
                                 const noteId = pitches.length > 1 ? `${elementId}-${pitchIndex}` : elementId
                                 const pitchKey = `${step}.${octave}`
                                 const tieAttr = pitch.startTie && pitch.endTie ? ` tie="m"` : pitch.startTie ? ` tie="i"` : pitch.endTie ? ` tie="t"` : ""
-                                const writtenAccidental = pitch.accidental && ACCIDENTAL_CODES[pitch.accidental]
-                                if (writtenAccidental) barAccidentals[pitchKey] = writtenAccidental
-                                const soundingAccidental = writtenAccidental || barAccidentals[pitchKey] || (pitch.endTie && previousTied[pitchKey]) || voiceKeyAccidentals[PITCH_NAMES[step]] || "n"
+                                const explicitAccidental = pitch.accidental && ACCIDENTAL_CODES[pitch.accidental]
+                                if (explicitAccidental) abcBarAccidentals[pitchKey] = explicitAccidental
+                                const soundingAccidental = explicitAccidental || abcBarAccidentals[pitchKey] || (pitch.endTie && previousTied[pitchKey]) || voiceKeyAccidentals[PITCH_NAMES[step]] || "n"
+                                let writtenAccidental = explicitAccidental
+                                if (!writtenAccidental && midBarKeyChanged && !pitch.endTie) {
+                                    const displayedAccidental = displayedBarAccidentals[pitchKey] || measureKeyAccidentals[PITCH_NAMES[step]] || "n"
+                                    if (soundingAccidental !== displayedAccidental) writtenAccidental = soundingAccidental
+                                }
+                                if (writtenAccidental) displayedBarAccidentals[pitchKey] = writtenAccidental
                                 if (pitch.startTie) nextTied[pitchKey] = soundingAccidental
                                 else delete nextTied[pitchKey]
                                 const accidentalAttr = (writtenAccidental ? ` accid="${writtenAccidental}"` : "") + (!writtenAccidental && soundingAccidental !== "n" ? ` accid.ges="${soundingAccidental}"` : "")
@@ -447,7 +503,8 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
 
                     while (openTags.length) measureXml.push(`</${openTags.pop()!}>`)
                     tiedAccidentals[voiceKey] = nextTied
-                    carriedBarAccidentals[voiceKey] = currentMeasure && !currentMeasure.barType ? barAccidentals : {}
+                    carriedBarAccidentals[voiceKey] = currentMeasure && !currentMeasure.barType ? abcBarAccidentals : {}
+                    carriedDisplayedAccidentals[voiceKey] = currentMeasure && !currentMeasure.barType ? displayedBarAccidentals : {}
                     measureXml.push("</layer>")
                 })
                 measureXml.push("</staff>")
@@ -464,7 +521,7 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
 
     scoreOutput.push(measureBuffers.map((xmlParts, index) => xmlParts.join("").replace("</measure>", `${(measureControls[index] || []).join("")}</measure>`)).join(""), "</section>")
     return {
-        mei: `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><meiHead><fileDesc><titleStmt><title>${escapeXml(title)}</title></titleStmt><pubStmt/></fileDesc></meiHead><music><body><mdiv><score>${scoreOutput.join("")}</score></mdiv></body></music></mei>`,
+        mei: `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score>${scoreOutput.join("")}</score></mdiv></body></music></mei>`,
         title,
         problems,
         parts,
@@ -472,14 +529,13 @@ export function convertTuneToMei(tune: TuneObject | undefined, abc: string): Abc
     }
 }
 
-export function abcToMei(abc: string, parseOnly: AbcParseOnly): AbcToMeiResult {
-    return convertTuneToMei(parseAbcTune(abc, parseOnly), abc)
-}
-
 export function convertAndCheckAbc(abc: string, parseOnly: AbcParseOnly): AbcAnalysisResult {
-    const tune = parseAbcTune(abc, parseOnly)
-    const converted = convertTuneToMei(tune, abc)
-    const problems = checkAbcTune(tune, abc, converted.problems)
+    const tunes = parseAbcTunes(abc, parseOnly)
+    const normalized = normalizeLineEndings(abc)
+    const secondTuneLine = tunes.length > 1 ? findSecondTuneLine(normalized.split("\n")) : -1
+    const declaredStaffVoices = getDeclaredStaffVoices(normalized, secondTuneLine)
+    const converted = convertTuneToMei(tunes[0], abc, declaredStaffVoices)
+    const problems = checkAbcTune(tunes, abc, converted.problems)
     return {
         ...converted,
         problems,

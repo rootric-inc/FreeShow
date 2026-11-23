@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { createAbcTemplate, insertAbcAtCursor, readAbcHeader, updateAbcHeaderField } from "./abcSource"
+import { adjustCursorForEdit, createAbcTemplate, insertAbcAtCursor, readAbcHeader, updateAbcHeaderField } from "./abcSource"
 import { getSheetMusicAbc } from "./helpers"
 
 describe("abcSource templates and header helpers", () => {
@@ -60,6 +60,20 @@ describe("abcSource templates and header helpers", () => {
 
         const clefOnlyKey = ["M: 4/4", "K: clef=bass octave=-1", "C4 |"].join("\n")
         expect(updateAbcHeaderField(clefOnlyKey, "K", "G")).toBe(["M: 4/4", "K: G clef=bass octave=-1", "C4 |"].join("\n"))
+    })
+
+    it("adds M: to the header instead of editing an M: line in the music body", () => {
+        const bodyMeterOnly = ["T: Song", "L: 1/4", "K: C", "C D E F |", "M: 3/4", "G A B |"].join("\n")
+        expect(readAbcHeader(bodyMeterOnly).meter).toBe("4/4")
+        expect(updateAbcHeaderField(bodyMeterOnly, "M", "6/8")).toBe(["T: Song", "M: 6/8", "L: 1/4", "K: C", "C D E F |", "M: 3/4", "G A B |"].join("\n"))
+    })
+
+    it("adjusts a cursor offset across header edits without losing position in the body", () => {
+        expect(adjustCursorForEdit(5, 20, 21, 2)).toBe(5)
+        expect(adjustCursorForEdit(20, 20, 21, 2)).toBe(20)
+        expect(adjustCursorForEdit(21, 20, 21, 2)).toBe(22)
+        expect(adjustCursorForEdit(100, 20, 21, 2)).toBe(101)
+        expect(adjustCursorForEdit(22, 20, 25, 2)).toBe(22)
     })
 
     it("inserts text at cursor position or replaces a selection", () => {

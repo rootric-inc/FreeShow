@@ -16,10 +16,11 @@
     import MaterialDropdown from "../../inputs/MaterialDropdown.svelte"
     import type { AbcProblem } from "../../slide/views/sheetMusic/abcChecks"
     import { mergeNeighborProblems } from "../../slide/views/sheetMusic/abcChecks"
-    import { loadAbcjs } from "../../slide/views/sheetMusic/abcjs"
+    import type { AbcjsGlobal } from "../../slide/views/sheetMusic/abcjs"
+    import { getLoadedAbcjs, loadAbcjs } from "../../slide/views/sheetMusic/abcjs"
     import type { AbcHeaderInfo, AbcPartsLayout } from "../../slide/views/sheetMusic/abcSource"
-    import { ABC_KEYS, ABC_METERS, createAbcTemplate, insertAbcAtCursor, normalizeLineEndings, readAbcHeader, updateAbcHeaderField } from "../../slide/views/sheetMusic/abcSource"
-    import type { AbcNoteRange } from "../../slide/views/sheetMusic/abcToMei"
+    import { ABC_KEYS, ABC_METERS, adjustCursorForEdit, createAbcTemplate, insertAbcAtCursor, normalizeLineEndings, readAbcHeader, updateAbcHeaderField } from "../../slide/views/sheetMusic/abcSource"
+    import type { AbcAnalysisResult, AbcNoteRange } from "../../slide/views/sheetMusic/abcToMei"
     import { convertAndCheckAbc } from "../../slide/views/sheetMusic/abcToMei"
     import { SheetMusicError, getSheetMusicErrorKey, loadMusic, renderMusic } from "../../slide/views/sheetMusic/engine"
     import { calculatePageWidth, decodeBase64Text, getSheetMusicAbc, getSheetMusicData, getSheetMusicLabel, getSheetMusicSize, prefixSvgIds } from "../../slide/views/sheetMusic/helpers"
@@ -82,8 +83,7 @@
 
     let text = normalizeLineEndings(current.abc || "")
     let lastSavedAbc = text
-    let pendingSaveAbc: string | null = null
-    let saveToken = 0
+    let loadedAbcjs: AbcjsGlobal | null = getLoadedAbcjs()
     let applyingProgrammaticEdit = false
 
     const initialHeader: AbcHeaderInfo = text.trim() ? readAbcHeader(text) : { key: "Eb", meter: "4/4", parts: "four" }
@@ -133,8 +133,11 @@
     }
 
     async function loadParser() {
+        if (loadedAbcjs) return loadedAbcjs
         try {
-            return await loadAbcjs()
+            const mod = await loadAbcjs()
+            loadedAbcjs = mod
+            return mod
         } catch (err) {
             throw new AbcParserLoadError(err)
         }
@@ -187,72 +190,78 @@
         }
     }
 
-    // Single save path used by both live typing and closing/tab-switching; never aborted on close
-    async function saveAbc(source: string): Promise<void> {
+    // Single synchronous save path used by typing, tab switches and popup close
+    function saveAbc(source: string, precomputedAnalysis?: AbcAnalysisResult): void {
+        if (destroyed) return
         const normalized = normalizeLineEndings(source)
-        if (!normalized.trim() || normalized === lastSavedAbc || normalized === pendingSaveAbc) return
+        if (normalized === lastSavedAbc) return
 
-        const token = ++saveToken
-        pendingSaveAbc = normalized
-
-        try {
-            const abcjs = await loadParser()
-            if (token !== saveToken) return
-
-            const analysis = convertAndCheckAbc(normalized, abcjs.parseOnly)
-            if (!analysis.mei || analysis.hasError) {
-                if (token === saveToken) pendingSaveAbc = null
-                return
-            }
-
-            const cleaned = await loadMusic({ text: analysis.mei })
-            if (token !== saveToken) return
-
-            const nextState: SheetMusicState = {
-                abc: normalized,
-                data: cleaned.mei
-            }
-            if (analysis.title) nextState.label = analysis.title
-            if (current.size !== undefined) nextState.size = current.size
-
-            lastSavedAbc = normalized
-            pendingSaveAbc = null
-            current = nextState
-            if (!destroyed) previewData = cleaned.mei
-
-            if (onSave) onSave({ ...nextState })
-        } catch (err) {
-            if (token === saveToken) pendingSaveAbc = null
-            console.error("Sheet music save error:", err)
-            if (!destroyed && token === saveToken) {
-                setTaskError(err, { fallbackError: "load", isAbcTask: true })
-            }
+        if (!normalized.trim()) {
+            if (!current.abc) return
+            const clearedState: SheetMusicState = {}
+            if (current.size !== undefined) clearedState.size = current.size
+            lastSavedAbc = ""
+            current = clearedState
+            previewSvg = ""
+            previewData = ""
+            truncated = false
+            hasAbcError = false
+            if (onSave) onSave({ ...clearedState })
+            return
         }
+
+        let analysis = precomputedAnalysis
+        if (!analysis) {
+            const abcjs = loadedAbcjs || getLoadedAbcjs()
+            if (!abcjs) return
+            loadedAbcjs = abcjs
+            analysis = convertAndCheckAbc(normalized, abcjs.parseOnly)
+        }
+        if (!analysis.mei || analysis.hasError) return
+
+        const nextState: SheetMusicState = {
+            abc: normalized,
+            data: analysis.mei
+        }
+        if (analysis.title) nextState.label = analysis.title
+        if (current.size !== undefined) nextState.size = current.size
+
+        lastSavedAbc = normalized
+        current = nextState
+        if (onSave) onSave({ ...nextState })
     }
 
     function flushPendingSave() {
         const normalized = normalizeLineEndings(text)
         if (normalized !== lastSavedAbc) {
-            void saveAbc(normalized)
+            saveAbc(normalized)
         }
     }
 
     const listenerId = receiveToMain(ToMain.OPEN_FILE2, (data) => {
-        if (data.id !== PICK_ID || data.channel !== CHANNEL || !data.files || !data.files.length) return
+        if (destroyed || data.id !== PICK_ID || data.channel !== CHANNEL || !data.files || !data.files.length) return
         const filePath = data.files[0]
         const rawBase64 = (data.content && data.content[filePath]) || ""
         handleFile(filePath, rawBase64)
     })
 
+    function preloadParser() {
+        void loadParser().catch(() => null)
+    }
+
     onMount(() => {
-        if (activeTab === "type" && text.trim()) runConvert(text, false)
-        else if (activeTab === "file" && current.data) renderFilePreview(current.data)
+        if (activeTab === "type") {
+            if (text.trim()) runConvert(text, false)
+            else preloadParser()
+        } else if (activeTab === "file" && current.data) {
+            renderFilePreview(current.data)
+        }
     })
 
     onDestroy(() => {
-        destroyed = true
         cancelPending()
         flushPendingSave()
+        destroyed = true
         destroyMain(listenerId)
     })
 
@@ -265,7 +274,14 @@
 
         if (tab === "file") {
             flushPendingSave()
-            if (current.data && current.data !== previewData) renderFilePreview(current.data)
+            applyHighlight("")
+            if (current.data) {
+                if (current.data !== previewData || !previewSvg) renderFilePreview(current.data)
+            } else {
+                previewSvg = ""
+                previewData = ""
+                truncated = false
+            }
             return
         }
 
@@ -279,6 +295,7 @@
             noteRanges = []
             hasAbcError = false
             truncated = false
+            preloadParser()
         }
     }
 
@@ -312,6 +329,7 @@
     }
 
     function handleFile(filePath: string, rawBase64: string) {
+        if (destroyed) return
         truncated = false
         if (!rawBase64) {
             error = translateText("error.sheet_music_load")
@@ -333,8 +351,6 @@
                 }
                 if (current.size !== undefined) nextState.size = current.size
 
-                saveToken++
-                pendingSaveAbc = null
                 lastSavedAbc = ""
                 text = ""
                 current = nextState
@@ -342,7 +358,7 @@
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
                 truncated = rendered.pages > 1
 
-                if (onSave) onSave({ ...current })
+                if (!destroyed && onSave) onSave({ ...current })
             },
             { fallbackError: "load" }
         )
@@ -370,10 +386,11 @@
             cancelPending()
             problems = []
             noteRanges = []
-            hasAbcError = Boolean(previewSvg)
             truncated = false
             loading = false
             applyHighlight("")
+            if (shouldSave) saveAbc(source)
+            hasAbcError = Boolean(previewSvg)
             return
         }
 
@@ -390,26 +407,26 @@
                 hasAbcError = analysis.hasError
                 if (analysis.hasError) return
 
+                if (shouldSave) {
+                    saveAbc(normalized, analysis)
+                }
+
                 const rendered = await renderMei(analysis.mei, signal)
                 if (!isLive()) return
 
                 previewSvg = prefixSvgIds(rendered.svg, SVG_ID_PREFIX)
-                previewData = ""
+                previewData = analysis.mei
                 truncated = rendered.pages > 1
                 await tick()
                 if (!isLive()) return
                 updateHighlight()
-
-                if (shouldSave) {
-                    await saveAbc(normalized)
-                }
             },
             { fallbackError: "render", isAbcTask: true, existingToken }
         )
     }
 
     // Apply edits via execCommand("insertText") so the textarea keeps its native Ctrl+Z undo stack
-    function replaceTextareaRange(start: number, end: number, replacement: string): number {
+    function replaceTextareaRange(start: number, end: number, replacement: string, preventScroll = false): number {
         const clampedStart = Math.max(0, Math.min(text.length, Math.floor(start)))
         const clampedEnd = Math.max(clampedStart, Math.min(text.length, Math.floor(end)))
         const expected = text.slice(0, clampedStart) + replacement + text.slice(clampedEnd)
@@ -418,7 +435,7 @@
         if (textareaEl) {
             applyingProgrammaticEdit = true
             try {
-                textareaEl.focus()
+                textareaEl.focus(preventScroll ? { preventScroll: true } : undefined)
                 textareaEl.setSelectionRange(clampedStart, clampedEnd)
                 const inserted = typeof document !== "undefined" && typeof document.execCommand === "function" && document.execCommand("insertText", false, replacement)
                 if (inserted && textareaEl.value === expected) {
@@ -444,7 +461,34 @@
             endOld--
             endNew--
         }
-        replaceTextareaRange(start, endOld, updated.slice(start, endNew))
+
+        const replacement = updated.slice(start, endNew)
+        const savedStart = textareaEl ? textareaEl.selectionStart : 0
+        const savedEnd = textareaEl ? textareaEl.selectionEnd : 0
+        const savedDirection = textareaEl ? textareaEl.selectionDirection : null
+        const savedScrollTop = textareaEl ? textareaEl.scrollTop : 0
+        const savedScrollLeft = textareaEl ? textareaEl.scrollLeft : 0
+        const previousFocus = typeof document !== "undefined" ? document.activeElement : null
+
+        replaceTextareaRange(start, endOld, replacement, true)
+
+        if (!textareaEl) return
+        const nextStart = adjustCursorForEdit(savedStart, start, endOld, replacement.length)
+        const nextEnd = adjustCursorForEdit(savedEnd, start, endOld, replacement.length)
+        const restoreViewport = () => {
+            if (!textareaEl) return
+            textareaEl.setSelectionRange(nextStart, nextEnd, savedDirection || undefined)
+            textareaEl.scrollTop = savedScrollTop
+            textareaEl.scrollLeft = savedScrollLeft
+            if (previousFocus instanceof HTMLElement && previousFocus !== textareaEl && previousFocus.isConnected) {
+                previousFocus.focus({ preventScroll: true })
+            }
+            updateHighlight()
+        }
+        restoreViewport()
+        void tick().then(() => {
+            if (!destroyed) restoreViewport()
+        })
     }
 
     function changeHeader(field: "K" | "M", value: string) {
