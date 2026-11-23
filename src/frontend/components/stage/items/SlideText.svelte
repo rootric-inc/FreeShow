@@ -9,7 +9,7 @@
     import Zoomed from "../../slide/Zoomed.svelte"
     import { getStyleResolution } from "../../slide/getStyleResolution"
     import Main from "../../system/Main.svelte"
-    import { getStageTextLayoutOffset } from "../stage"
+    import { getStageTextLayoutOffset, isItemVisibleOnStage } from "../stage"
 
     export let currentSlide: OutSlide
     export let slideOffset = 0
@@ -54,7 +54,7 @@
         if (!items.length) return []
 
         items
-            .filter((item) => (item?.type || "text") === "text" && (!item?.bindings?.length || item.bindings.includes("stage")))
+            .filter((item) => (item?.type || "text") === "text" && isItemVisibleOnStage(item))
             .forEach((item, i) => {
                 if (itemNumber && itemNumber - 1 !== i) return
 
@@ -122,14 +122,14 @@
             <Zoomed background={slideBackgroundColor} style={getStyleResolution(resolution, width, height, "fit")} center>
                 <div class:loading={items1 && !firstActive}>
                     {#each items1 as item, i}
-                        {#if !itemNumber || slide?.items?.length === 1 || itemNumber - 1 === i}
+                        {#if isItemVisibleOnStage(item) && (!itemNumber || slide?.items?.length === 1 || itemNumber - 1 === i)}
                             <Textbox {item} customStyle={textStyle} {stageItem} {chords} {ref} maxLines={Number(slideOffset !== 0 && stageItem.lineCount)} maxLinesInvert={slideOffset < 0} stageAutoSize={item.textFit !== "none" && autoSize} {fontSize} {clickRevealed} {revealed} isStage originalStyle />
                         {/if}
                     {/each}
                 </div>
                 <div class:loading={items2 && firstActive}>
                     {#each items2 as item, i}
-                        {#if !itemNumber || slide?.items?.length === 1 || itemNumber - 1 === i}
+                        {#if isItemVisibleOnStage(item) && (!itemNumber || slide?.items?.length === 1 || itemNumber - 1 === i)}
                             <Textbox {item} customStyle={textStyle} {stageItem} {chords} {ref} maxLines={Number(slideOffset !== 0 && stageItem.lineCount)} maxLinesInvert={slideOffset < 0} stageAutoSize={item.textFit !== "none" && autoSize} {fontSize} {clickRevealed} {revealed} isStage originalStyle />
                         {/if}
                     {/each}

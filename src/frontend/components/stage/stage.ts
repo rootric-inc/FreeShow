@@ -185,3 +185,8 @@ export function getStageTextLayoutOffset(showRef: LayoutRef[], slideOffset: numb
 
     return customOffset
 }
+
+export function isItemVisibleOnStage(item: Item | undefined): boolean {
+    if (!item) return false
+    return !item.bindings?.length || item.bindings.includes("stage")
+}
