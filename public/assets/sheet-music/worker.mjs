@@ -1,9 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-
-const DEFAULT_PAGE_WIDTH = 2100
-const MIN_PAGE_WIDTH = 100
-const MAX_PAGE_WIDTH = 100000
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, countMeasures, extractTitle, findFittingLayout, normalizeMei, sanitizeSvgUrls } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -38,52 +35,21 @@ function getToolkit() {
     return toolkitPromise
 }
 
-function decodeXmlEntities(text) {
-    return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (_match, entity) => {
-        if (entity === "amp") return "&"
-        if (entity === "lt") return "<"
-        if (entity === "gt") return ">"
-        if (entity === "quot") return '"'
-        if (entity === "apos") return "'"
-        if (entity.startsWith("#x")) return String.fromCodePoint(parseInt(entity.slice(2), 16))
-        if (entity.startsWith("#")) return String.fromCodePoint(parseInt(entity.slice(1), 10))
-        return `&${entity};`
-    })
-}
-
-function extractTitle(mei) {
-    const headMatch = mei.match(/<meiHead(?:\s[^>]*)?>([\s\S]*?)<\/meiHead>/)
-    if (!headMatch) return ""
-    const titleMatch = headMatch[1].match(/<title\b[^>]*>([\s\S]*?)<\/title>/)
-    if (!titleMatch) return ""
-    const plain = titleMatch[1].replace(/<[^>]+>/g, " ")
-    return decodeXmlEntities(plain).replace(/\s+/g, " ").trim()
-}
-
-function normalizeMei(mei) {
-    return mei
-        .replace(/<\?xml-model[\s\S]*?\?>\s*/g, "")
-        .replace(/<meiHead(?:\s[^>]*)?\/>|<meiHead(?:\s[^>]*)?>[\s\S]*?<\/meiHead>/g, "")
-        .replace(/<(label|labelAbbr)(?:\s[^>]*)?\/>|<(label|labelAbbr)(?:\s[^>]*)?>[\s\S]*?<\/\2>/g, "")
-        .replace(/<staffGrp\b([^>]*?)(\/?)>/g, (_match, attrs, slash) => {
-            if (/\bbar\.thru=(?:"[^"]*"|'[^']*')/.test(attrs)) {
-                return `<staffGrp${attrs.replace(/\bbar\.thru=(?:"[^"]*"|'[^']*')/, 'bar.thru="false"')}${slash}>`
-            }
-            return `<staffGrp${attrs} bar.thru="false"${slash}>`
-        })
-        .replace(/>\s+</g, "><")
-        .trim()
-}
-
-function countMeasures(mei) {
-    const matches = mei.match(/<measure(?:\s|>|\/)/g)
-    return matches ? matches.length : 0
-}
-
 function formatError(err, fallback) {
     if (err instanceof Error && err.message) return err.message
     if (typeof err === "string" && err.trim()) return err.trim()
     return fallback
+}
+
+function createWorkerError(code, message) {
+    const err = new Error(message)
+    err.code = code
+    return err
+}
+
+function getErrorCode(err, messageType) {
+    if (err && typeof err === "object" && typeof err.code === "string" && err.code) return err.code
+    return messageType === "render" ? "render_failed" : "load_failed"
 }
 
 export async function handleMessage(message) {
@@ -92,68 +58,91 @@ export async function handleMessage(message) {
 
     if (type === "load") {
         const { text, base64 } = message
-        tk.resetOptions()
-        // Verovio's resetOptions defaults inputFrom to "mei", so restore auto-detection for MusicXML/MEI
-        tk.setOptions({ inputFrom: "auto" })
+        try {
+            tk.resetOptions()
+            // Verovio's resetOptions defaults inputFrom to "mei", so restore auto-detection for MusicXML/MEI
+            tk.setOptions({ inputFrom: "auto" })
 
-        let loaded = 0
-        if (typeof base64 === "string" && base64.length > 0) {
-            try {
+            let loaded = 0
+            if (typeof base64 === "string" && base64.length > 0) {
                 loaded = tk.loadZipDataBase64(base64)
-            } catch (_err) {
-                throw new Error("Could not read music file")
+            } else if (typeof text === "string" && text.length > 0) {
+                loaded = tk.loadData(text)
+            } else {
+                throw createWorkerError("load_failed", "No music data provided")
             }
-        } else if (typeof text === "string" && text.length > 0) {
-            loaded = tk.loadData(text)
-        } else {
-            throw new Error("No music data provided")
+
+            if (!loaded) throw createWorkerError("load_failed", "Could not read music file")
+
+            const rawMei = tk.getMEI({ removeIds: true })
+            if (!rawMei) throw createWorkerError("load_failed", "Could not extract music data")
+
+            const title = extractTitle(rawMei)
+            const mei = normalizeMei(rawMei)
+            const measures = countMeasures(mei)
+            if (measures === 0) throw createWorkerError("empty_music", "No music measures found")
+
+            return { mei, title, measures }
+        } catch (err) {
+            if (err && typeof err === "object" && typeof err.code === "string") throw err
+            throw createWorkerError("load_failed", formatError(err, "Could not read music file"))
         }
-
-        if (!loaded) throw new Error("Could not read music file")
-
-        const rawMei = tk.getMEI({ removeIds: true })
-        if (!rawMei) throw new Error("Could not extract music data")
-
-        const title = extractTitle(rawMei)
-        const mei = normalizeMei(rawMei)
-        const measures = countMeasures(mei)
-        if (measures === 0) throw new Error("No music measures found")
-
-        return { mei, title, measures }
     }
 
     if (type === "render") {
-        const { mei, pageWidth } = message
-        if (typeof mei !== "string" || !mei.trim()) throw new Error("No music data to render")
+        const { mei, pageWidth, ratio } = message
+        if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
         const clampedWidth = Math.max(MIN_PAGE_WIDTH, Math.min(MAX_PAGE_WIDTH, parsedWidth))
+        const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
 
-        tk.resetOptions()
-        tk.setOptions({ ...RENDER_OPTIONS, pageWidth: clampedWidth })
+        try {
+            let loadedOnce = false
+            const renderAt = (width) => {
+                if (!loadedOnce) {
+                    tk.resetOptions()
+                    tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
+                    const loaded = tk.loadData(mei)
+                    if (!loaded) throw createWorkerError("render_failed", "Could not render music")
+                    loadedOnce = true
+                } else {
+                    tk.setOptions({ ...RENDER_OPTIONS, pageWidth: width })
+                    tk.redoLayout()
+                }
 
-        const loaded = tk.loadData(mei)
-        if (!loaded) throw new Error("Could not render music")
+                const svg = tk.renderToSVG(1)
+                if (!svg) throw createWorkerError("render_failed", "Could not render music")
+                const pageCount = tk.getPageCount()
+                return { svg, pageCount }
+            }
 
-        const svg = tk.renderToSVG(1)
-        if (!svg) throw new Error("Could not render music")
+            if (targetRatio === null) {
+                const { svg, pageCount } = renderAt(clampedWidth)
+                return { svg: sanitizeSvgUrls(svg), pageWidth: clampedWidth, truncated: pageCount > 1 }
+            }
 
-        return { svg }
+            const fitted = findFittingLayout(clampedWidth, targetRatio, renderAt)
+            return { svg: sanitizeSvgUrls(fitted.svg), pageWidth: fitted.pageWidth, truncated: fitted.truncated }
+        } catch (err) {
+            if (err && typeof err === "object" && typeof err.code === "string") throw err
+            throw createWorkerError("render_failed", formatError(err, "Could not render music"))
+        }
     }
 
-    throw new Error(`Unknown sheet music worker message: ${String(type)}`)
+    throw createWorkerError("load_failed", `Unknown sheet music worker message: ${String(type)}`)
 }
 
 if (typeof self !== "undefined") {
     self.onmessage = async (event) => {
         const message = event.data || {}
-        const { id } = message
+        const { id, type } = message
 
         try {
             const result = await handleMessage(message)
             self.postMessage({ id, ok: true, result })
         } catch (err) {
-            self.postMessage({ id, ok: false, error: formatError(err, "Sheet music engine error") })
+            self.postMessage({ id, ok: false, code: getErrorCode(err, type), error: formatError(err, "Sheet music engine error") })
         }
     }
 }

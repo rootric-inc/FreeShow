@@ -346,7 +346,11 @@
     "error": {
         "no_show": "Could not find show",
         "load": "Could not load",
-        "sheet_music_load": "Could not load sheet music file",
+        "sheet_music_load": "Could not read sheet music file",
+        "sheet_music_empty": "No music found in this file",
+        "sheet_music_render": "Could not draw this music",
+        "sheet_music_timeout": "Sheet music engine did not answer in time",
+        "sheet_music_truncated": "This music is too long for one item",
         "media": "Could not find media",
         "bible": "Could not find local scripture",
         "import": "Could not import",

@@ -10,6 +10,7 @@
     import { moveInvertedItems } from "../scripts/itemHelpers"
     import { getItemText } from "../scripts/textStyle"
     import { itemBoxes } from "../values/boxes"
+    import { getSheetMusicLabel } from "../../slide/views/sheetMusic/helpers"
 
     const dragReorder = createDragReorder((fromIndices, toIndex) => {
         const reordered = dragReorder.getReorderedList(invertedItemList, fromIndices, toIndex)
@@ -42,7 +43,7 @@
             return item.chart?.type || ""
         },
         sheet_music: (item: Item) => {
-            return item.sheet_music?.label || ""
+            return getSheetMusicLabel(item.sheet_music)
         },
         table: () => ""
     }

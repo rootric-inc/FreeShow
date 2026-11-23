@@ -70,6 +70,7 @@ function getSheetMusicEngine() {
         }
     } catch (err) {
         console.error("Could not copy sheet music engine files:", err)
+        if (process.env.NODE_ENV === "production") process.exit(1)
     }
 }
 
