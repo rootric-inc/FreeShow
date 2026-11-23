@@ -1,5 +1,33 @@
 import { describe, expect, it } from "vitest"
-import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, hasHiddenInitialMeter, mergeSheetMusicOwnedFields, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
+import {
+    DEFAULT_ITEM_HEIGHT,
+    DEFAULT_ITEM_WIDTH,
+    calculatePageWidth,
+    clampNotationSize,
+    createRenderCacheKey,
+    decodeBase64Text,
+    escapeHtml,
+    getItemRatioFromStyle,
+    getPageWidthFromStyle,
+    getSheetMusicCustomParts,
+    getSheetMusicData,
+    getSheetMusicDisplayLabel,
+    getSheetMusicLabel,
+    getSheetMusicMeasures,
+    getSheetMusicParts,
+    getSheetMusicSize,
+    getSheetMusicTranspose,
+    getSheetMusicVerses,
+    hasHiddenInitialMeter,
+    mergeSheetMusicOwnedFields,
+    normalizeSheetMusicTranspose,
+    parseItemHeight,
+    parseItemWidth,
+    prefixSvgIds,
+    showHasSheetMusic,
+    stepSheetMusicTranspose,
+    SvgCache
+} from "./helpers"
 
 describe("sheetMusic page width and ratio math", () => {
     it("calculates page width for sizes 50, 100 and 200", () => {
@@ -47,7 +75,7 @@ describe("sheetMusic page width and ratio math", () => {
 })
 
 describe("createRenderCacheKey", () => {
-    it("distinguishes different MEI documents, page widths, ratios and measure-number flags", () => {
+    it("distinguishes different MEI documents, page widths, ratios, measure-number flags and transpose values", () => {
         const keyA = createRenderCacheKey("<mei>A</mei>", 1840)
         const keyB = createRenderCacheKey("<mei>B</mei>", 1840)
         const keyC = createRenderCacheKey("<mei>A</mei>", 2300)
@@ -55,10 +83,14 @@ describe("createRenderCacheKey", () => {
         const keyRatio2 = createRenderCacheKey("<mei>A</mei>", 1840, 0.56)
         const keyNumbers = createRenderCacheKey("<mei>A</mei>", 1840, undefined, true)
         const keyRatioNumbers = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, true)
+        const keyUp2 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 2)
+        const keyDown3 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, -3)
 
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840))
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false))
+        expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false, 0))
         expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31))
+        expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0))
         expect(keyNumbers).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, true))
         expect(keyA).not.toBe(keyB)
         expect(keyA).not.toBe(keyC)
@@ -66,6 +98,9 @@ describe("createRenderCacheKey", () => {
         expect(keyA).not.toBe(keyNumbers)
         expect(keyRatio1).not.toBe(keyRatio2)
         expect(keyRatio1).not.toBe(keyRatioNumbers)
+        expect(keyRatio1).not.toBe(keyUp2)
+        expect(keyRatio1).not.toBe(keyDown3)
+        expect(keyUp2).not.toBe(keyDown3)
     })
 })
 
@@ -215,5 +250,84 @@ describe("hasHiddenInitialMeter", () => {
         expect(hasHiddenInitialMeter('<mei><scoreDef><staffGrp><staffDef n="1"><meterSig count="4" unit="4" visible="false"/></staffDef></staffGrp></scoreDef></mei>')).toBe(true)
         expect(hasHiddenInitialMeter('<mei><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp/></scoreDef><section><scoreDef meter.visible="false"/></section></mei>')).toBe(false)
         expect(hasHiddenInitialMeter("")).toBe(false)
+    })
+})
+
+describe("sheetMusic transpose helpers", () => {
+    it("reads and validates transpose values in [-11, 11] and counts invalid values as 0", () => {
+        expect(getSheetMusicTranspose(undefined)).toBe(0)
+        expect(getSheetMusicTranspose(null)).toBe(0)
+        expect(getSheetMusicTranspose({})).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: 0 })).toBe(0)
+        expect(Object.is(getSheetMusicTranspose({ transpose: -0 }), 0)).toBe(true)
+        expect(getSheetMusicTranspose({ transpose: 2 })).toBe(2)
+        expect(getSheetMusicTranspose({ transpose: -11 })).toBe(-11)
+        expect(getSheetMusicTranspose({ transpose: 11 })).toBe(11)
+        expect(getSheetMusicTranspose({ transpose: 12 })).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: -12 })).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: 1.5 })).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: "2" })).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: Number.NaN })).toBe(0)
+        expect(getSheetMusicTranspose({ transpose: Number.POSITIVE_INFINITY })).toBe(0)
+        expect(normalizeSheetMusicTranspose(-3)).toBe(-3)
+    })
+
+    it("steps transpose within [-5, 6] and wraps panel values into [-5, 6] before stepping", () => {
+        expect(stepSheetMusicTranspose(undefined, 1)).toBe(1)
+        expect(stepSheetMusicTranspose(0, 1)).toBe(1)
+        expect(stepSheetMusicTranspose(5, 1)).toBe(6)
+        expect(stepSheetMusicTranspose(6, 1)).toBe(-5)
+        expect(stepSheetMusicTranspose(-5, 1)).toBe(-4)
+        expect(Object.is(stepSheetMusicTranspose(-1, 1), 0)).toBe(true)
+
+        expect(stepSheetMusicTranspose(undefined, -1)).toBe(-1)
+        expect(stepSheetMusicTranspose(0, -1)).toBe(-1)
+        expect(stepSheetMusicTranspose(-4, -1)).toBe(-5)
+        expect(stepSheetMusicTranspose(-5, -1)).toBe(6)
+        expect(stepSheetMusicTranspose(6, -1)).toBe(5)
+        expect(Object.is(stepSheetMusicTranspose(1, -1), 0)).toBe(true)
+
+        // Seven presses up from 0 reaches -5 rather than +7
+        let value = 0
+        for (let i = 0; i < 7; i++) value = stepSheetMusicTranspose(value, 1)
+        expect(value).toBe(-5)
+
+        // Values set from the panel outside [-5, 6] are brought into [-5, 6] first, then stepped
+        expect(stepSheetMusicTranspose(7, 1)).toBe(-4)
+        expect(stepSheetMusicTranspose(7, -1)).toBe(6)
+        expect(Object.is(stepSheetMusicTranspose(11, 1), 0)).toBe(true)
+        expect(stepSheetMusicTranspose(11, -1)).toBe(-2)
+        expect(stepSheetMusicTranspose(-6, 1)).toBe(-5)
+        expect(stepSheetMusicTranspose(-6, -1)).toBe(5)
+        expect(stepSheetMusicTranspose(-11, 1)).toBe(2)
+        expect(Object.is(stepSheetMusicTranspose(-11, -1), 0)).toBe(true)
+
+        expect(stepSheetMusicTranspose("bad", 1)).toBe(1)
+        expect(stepSheetMusicTranspose(99, -1)).toBe(-1)
+    })
+
+    it("detects whether a show has sheet music items", () => {
+        const emptyShow = { slides: {} }
+        expect(showHasSheetMusic(emptyShow)).toBe(false)
+
+        const sheetMusicOnlyShow = {
+            slides: {
+                s1: { group: "Verse", color: null, settings: {}, notes: "", items: [{ type: "sheet_music" as const, style: "", sheet_music: { data: "<mei/>" } }] }
+            }
+        }
+        expect(showHasSheetMusic(sheetMusicOnlyShow)).toBe(true)
+
+        const textOnlyShow = {
+            slides: {
+                s1: {
+                    group: "Verse",
+                    color: null,
+                    settings: {},
+                    notes: "",
+                    items: [{ type: "text" as const, style: "", lines: [{ align: "", text: [{ value: "Hello", style: "" }] }] }]
+                }
+            }
+        }
+        expect(showHasSheetMusic(textOnlyShow)).toBe(false)
     })
 })

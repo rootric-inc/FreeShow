@@ -8,7 +8,6 @@ import { markItemsAsPlayed } from "../../converters/project"
 import { convertText } from "../../converters/txt"
 import { sendMain } from "../../IPC/main"
 import { slideTimelineSpeedMultiplier } from "../../stores"
-import { transposeText } from "../../utils/chordTranspose"
 import { triggerFunction } from "../../utils/common"
 import { obsSetScene, obsStartLivestream, obsStartRecording, obsStopLivestream, obsStopRecording } from "../../utils/obsTalk"
 import { save } from "../../utils/save"
@@ -25,8 +24,8 @@ import { changeOutputStyle, playSlideTimers, randomSlide, replaceDynamicValues, 
 import { startTimerById, startTimerByName, stopTimers } from "../helpers/timerTick"
 import { clearAll, clearBackground, clearDrawing, clearOverlay, clearOverlays, clearScene, clearSlide, clearTimers, restoreOutput } from "../output/clear"
 import { fadePause, skipNext, skipPrev, spotifyPause, spotifyPlay } from "../output/preview/SpotifyManager"
+import { transposeShow } from "../edit/scripts/chords"
 import { formatText } from "../show/formatTextEditor"
-import { getPlainEditorText } from "../show/getTextEditor"
 import { pauseTimeline, setTimelineTime, startTimeline, stopTimeline } from "../timeline/TimelinePlayback"
 import { runActionByName, runActionId, toggleAction } from "./actions"
 import { getActions, getCategories, getOutput, getOutputGroupName, getOutputSlideText, getPlayingAudioData, getPlayingAudioDuration, getPlayingAudioTime, getPlayingPlaylist, getPlayingVideoDuration, getPlayingVideoState, getPlayingVideoTime, getPlaylists, getProject, getProjects, getShow, getShowLayout, getShows, getSlide, getVariable, getVariables } from "./apiGet"
@@ -235,8 +234,8 @@ export const API_ACTIONS = {
     set_template: (data: API_id) => setTemplate(data.id),
     set_next_slide_timer: (data: API_numval) => setNextSlideTimer(data.value),
     change_slide_timeline_speed: (data: API_numval) => slideTimelineSpeedMultiplier.set(data.value ?? 1),
-    transpose_show_up: (data: API_id) => formatText(transposeText(getPlainEditorText(data.id), 1), data.id),
-    transpose_show_down: (data: API_id) => formatText(transposeText(getPlainEditorText(data.id), -1), data.id),
+    transpose_show_up: (data: API_id) => transposeShow(data.id, 1),
+    transpose_show_down: (data: API_id) => transposeShow(data.id, -1),
 
     // PRESENTATION
     next_slide: (_data?: any, { source }: { source?: string } = {}) => OutputHelper.advanceOutputs("next", source), // BC

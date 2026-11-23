@@ -31,9 +31,26 @@ function cloneValue<T>(value: T): T {
     }
 }
 
+export const EXCLUDED_STYLE_LEAVES = ["sheet_music.transpose"] as const
+
+function isExcludedStyleId(id: string): boolean {
+    return (EXCLUDED_STYLE_LEAVES as readonly string[]).includes(id)
+}
+
 function isStyleInput(input: StyleInput | null | undefined): input is StyleInput {
-    // Popup inputs and fields no input declares count as item content and are never copied.
-    return !!input && !!input.id && input.id !== "style" && input.type !== "popup"
+    // Popup inputs, excluded per-item settings, and fields no input declares count as item content and are never copied.
+    return !!input && !!input.id && input.id !== "style" && input.type !== "popup" && !isExcludedStyleId(input.id)
+}
+
+export function omitExcludedStyleLeaves(root: string, copied: any): any {
+    if (!isPlainObject(copied)) return copied
+
+    const filtered: Record<string, any> = {}
+    for (const [leaf, value] of Object.entries(copied)) {
+        if (isExcludedStyleId(`${root}.${leaf}`)) continue
+        filtered[leaf] = cloneValue(value)
+    }
+    return filtered
 }
 
 export function parseDottedId(id: string): [string, string] | null {

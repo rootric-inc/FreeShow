@@ -815,7 +815,8 @@ export const itemBoxes: Box2 = {
                                 ]
                             }
                         }
-                    ]
+                    ],
+                    [{ type: "number", id: "sheet_music.transpose", value: 0, hidden: true, values: { label: "edit.transpose", defaultValue: 0, step: 1, min: -11, max: 11, maxDecimals: 0, showSlider: true } }]
                 ]
             }
         }

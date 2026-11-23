@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { getItemSetValue } from "../../helpers/itemValues"
-import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, mergeStyleValues, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
+import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, mergeStyleValues, omitExcludedStyleLeaves, parseDottedId, setStyleLeaf, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput, StylePastePlan } from "./styleValues"
 
 const chartInputs: StyleInput[] = [
@@ -526,20 +526,22 @@ describe("setStyleLeaf", () => {
 })
 
 describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
-    it("copies size, parts, customParts and verses and never copies data, abc, label or measures", () => {
+    it("copies size, parts, customParts and verses and never copies data, abc, label, measures or transpose", () => {
         const boxesSource = readFileSync(fileURLToPath(new URL("../values/boxes.ts", import.meta.url)), "utf8")
         const sheetMusicBlock = boxesSource.slice(boxesSource.indexOf("sheet_music: {"))
         expect(sheetMusicBlock).toContain('type: "popup", id: "sheet_music"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.size"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.parts"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.verses"')
+        expect(sheetMusicBlock).toContain('id: "sheet_music.transpose"')
 
         const declaredSheetMusicInputs: StyleInput[] = [
             { id: "sheet_music", type: "popup" },
             { id: "style", type: "color" },
             { id: "sheet_music.size", type: "number" },
             { id: "sheet_music.parts", type: "dropdown" },
-            { id: "sheet_music.verses", type: "dropdown" }
+            { id: "sheet_music.verses", type: "dropdown" },
+            { id: "sheet_music.transpose", type: "number" }
         ]
         const inputs = withExtraStyleLeaves(declaredSheetMusicInputs, EXTRA_STYLE_LEAVES)
 
@@ -554,7 +556,8 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
                 size: 130,
                 parts: "custom" as const,
                 customParts: ["1.1", "2.1"],
-                verses: "2"
+                verses: "2",
+                transpose: -3
             }
         }
 
@@ -571,6 +574,7 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
         expect("abc" in copied.sheet_music).toBe(false)
         expect("label" in copied.sheet_music).toBe(false)
         expect("measures" in copied.sheet_music).toBe(false)
+        expect("transpose" in copied.sheet_music).toBe(false)
 
         const target = {
             data: "<mei>target</mei>",
@@ -578,7 +582,8 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             label: "Holy, Holy, Holy",
             measures: "1-4",
             size: 100,
-            parts: "all"
+            parts: "all",
+            transpose: 2
         }
         expect(mergeStyleValues(target, copied.sheet_music, true)).toEqual({
             data: "<mei>target</mei>",
@@ -588,7 +593,30 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             size: 130,
             parts: "custom",
             customParts: ["1.1", "2.1"],
-            verses: "2"
+            verses: "2",
+            transpose: 2
         })
+
+        // Copying from an item without transpose leaves the target's transpose untouched
+        const sourceWithoutTranspose = {
+            type: "sheet_music" as const,
+            sheet_music: { data: "<mei>plain</mei>", size: 100 }
+        }
+        const copiedPlain = copyStyleValues(sourceWithoutTranspose, inputs)
+        expect("transpose" in copiedPlain.sheet_music).toBe(false)
+        const mergedPlain = mergeStyleValues(target, copiedPlain.sheet_music, true)
+        expect(mergedPlain).toEqual({
+            data: "<mei>target</mei>",
+            abc: "M: 3/4\nK: G\nG3 |",
+            label: "Holy, Holy, Holy",
+            measures: "1-4",
+            size: 100,
+            transpose: 2
+        })
+
+        // Even if a clipboard payload contains sheet_music.transpose, paste strips it
+        const sanitized = omitExcludedStyleLeaves("sheet_music", { size: 130, transpose: -3 })
+        expect(sanitized).toEqual({ size: 130 })
+        expect(mergeStyleValues(target, sanitized, true).transpose).toBe(2)
     })
 })

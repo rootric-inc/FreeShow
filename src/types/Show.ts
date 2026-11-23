@@ -151,6 +151,7 @@ export interface Item {
         parts?: "all" | "upper" | "lower" | "melody" | "custom" // which voice parts are drawn. Missing means all
         customParts?: string[] // "staff.layer" keys such as "1.2", used only with "custom"
         verses?: string // which verses are drawn. Missing means all, "none" means no words, otherwise verse numbers separated by commas ("2" or "1,3")
+        transpose?: number // semitones from -11 to 11. Missing or 0 means as written
         measures?: string // the measures of the opened file this item holds, such as "5-8". A label only
     }
     tracker?: any // slide progress tracker item data

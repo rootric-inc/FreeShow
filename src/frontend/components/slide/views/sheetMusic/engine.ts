@@ -1,4 +1,4 @@
-import { SVG_CACHE_MAX_BYTES, SvgCache, createRenderCacheKey } from "./helpers"
+import { SVG_CACHE_MAX_BYTES, SvgCache, createRenderCacheKey, normalizeSheetMusicTranspose } from "./helpers"
 
 export type LoadMusicSource = { text: string } | { base64: string }
 
@@ -25,6 +25,7 @@ export interface RenderMusicResult {
 
 export interface RenderMusicOptions {
     showMeasureNumbers?: boolean
+    transpose?: number
 }
 
 export type SheetMusicErrorCode = "load_failed" | "empty_music" | "render_failed" | "timeout" | "aborted"
@@ -413,7 +414,8 @@ export function renderMusic(mei: string, pageWidth: number, ratio?: number, sign
 
     const validRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : undefined
     const showMeasureNumbers = Boolean(options?.showMeasureNumbers)
-    const key = createRenderCacheKey(mei, pageWidth, validRatio, showMeasureNumbers)
+    const transpose = normalizeSheetMusicTranspose(options?.transpose)
+    const key = createRenderCacheKey(mei, pageWidth, validRatio, showMeasureNumbers, transpose)
 
     if (isKeyTimedOut(key)) {
         return Promise.reject(new SheetMusicError("timeout", "Sheet music render timed out"))
@@ -428,6 +430,7 @@ export function renderMusic(mei: string, pageWidth: number, ratio?: number, sign
     const payload: Record<string, unknown> = { type: "render", mei, pageWidth }
     if (validRatio !== undefined) payload.ratio = validRatio
     if (showMeasureNumbers) payload.showMeasureNumbers = true
+    if (transpose !== 0) payload.transpose = transpose
     const job: QueuedJob<RenderMusicResult> = {
         id: null,
         type: "render",

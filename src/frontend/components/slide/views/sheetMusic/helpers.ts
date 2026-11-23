@@ -1,3 +1,4 @@
+import type { Slide } from "../../../../../types/Show"
 import { getStyles } from "../../../helpers/style"
 
 export const DEFAULT_ITEM_WIDTH = 1920
@@ -5,6 +6,8 @@ export const DEFAULT_ITEM_HEIGHT = 1080
 export const DEFAULT_NOTATION_SIZE = 100
 export const MIN_NOTATION_SIZE = 50
 export const MAX_NOTATION_SIZE = 200
+export const MIN_SHEET_MUSIC_TRANSPOSE = -11
+export const MAX_SHEET_MUSIC_TRANSPOSE = 11
 export const MIN_PAGE_WIDTH = 100
 export const MAX_PAGE_WIDTH = 100000
 export const SVG_CACHE_MAX_BYTES = 20 * 1024 * 1024
@@ -65,6 +68,32 @@ export function getSheetMusicMeasures(sheetMusic: unknown): string {
     if (!sheetMusic || typeof sheetMusic !== "object") return ""
     const measures = (sheetMusic as { measures?: unknown }).measures
     return typeof measures === "string" ? measures : ""
+}
+
+export function normalizeSheetMusicTranspose(value: unknown): number {
+    if (typeof value !== "number" || !Number.isInteger(value)) return 0
+    if (value < MIN_SHEET_MUSIC_TRANSPOSE || value > MAX_SHEET_MUSIC_TRANSPOSE) return 0
+    return value === 0 ? 0 : value
+}
+
+export function getSheetMusicTranspose(sheetMusic: unknown): number {
+    if (!sheetMusic || typeof sheetMusic !== "object") return 0
+    return normalizeSheetMusicTranspose((sheetMusic as { transpose?: unknown }).transpose)
+}
+
+export function stepSheetMusicTranspose(current: unknown, step: number): number {
+    let base = normalizeSheetMusicTranspose(current)
+    if (base > 6) base -= 12
+    else if (base < -5) base += 12
+
+    const delta = typeof step === "number" && Number.isFinite(step) ? Math.trunc(step) : 0
+    const next = ((((base + delta + 5) % 12) + 12) % 12) - 5
+    return next === 0 ? 0 : next
+}
+
+export function showHasSheetMusic(show: { slides?: { [key: string]: Slide } } | null | undefined): boolean {
+    if (!show?.slides) return false
+    return Object.values(show.slides).some((slide) => slide?.items?.some((item) => item?.type === "sheet_music"))
 }
 
 export const SHEET_MUSIC_POPUP_OWNED_FIELDS = ["data", "abc", "label", "measures"] as const
@@ -141,10 +170,12 @@ export function getPageWidthFromStyle(style: string | null | undefined, size: un
     return calculatePageWidth(parseItemWidth(style), size)
 }
 
-export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false): string {
+export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false, transpose = 0): string {
     const ratioPart = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? String(ratio) : ""
     const measureNumbersPart = showMeasureNumbers ? "mnum" : ""
-    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${mei}`
+    const normalizedTranspose = normalizeSheetMusicTranspose(transpose)
+    const transposePart = normalizedTranspose !== 0 ? `t${normalizedTranspose}` : ""
+    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${transposePart}:${mei}`
 }
 
 export function prefixSvgIds(svg: string, prefix: string): string {

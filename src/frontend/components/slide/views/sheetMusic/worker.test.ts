@@ -546,4 +546,133 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(narrowerMulti.svg).toBe(fittedMulti.svg)
         expect(getLastRenderLayouts()).toBe(1)
     })
+
+    it("transposes key signature, notes and accidentals in Verovio and resets transpose on subsequent renders", async () => {
+        const makeSingleStaffMei = (keysig: string, notes: string) => `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="${keysig}" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section><measure n="1"><staff n="1"><layer n="1">${notes}</layer></staff></measure></section></score></mdiv></body></music></mei>`
+
+        const getKeyAccidGlyphs = (svg: string): string[] => {
+            const keyAccidBlocks = svg.match(/<g[^>]*class="keyAccid"[^>]*>[\s\S]*?<\/g>/g) || []
+            return keyAccidBlocks.map((block) => block.match(/href="#(E[0-9A-F]{3})/)?.[1] || "")
+        }
+
+        const getNoteheadYs = (svg: string): number[] => [...svg.matchAll(/class="notehead"[^>]*>\s*<use[^>]*transform="translate\(-?\d+,\s*(-?\d+)\)/g)].map((m) => Number(m[1]))
+
+        const getNoteAccidGlyphs = (svg: string): (string | null)[] => {
+            const accidBlocks = svg.match(/<g[^>]*class="accid"[^>]*>(?:[\s\S]*?<\/g>)?|<g[^>]*class="accid"[^>]*\/>/g) || []
+            return accidBlocks.map((block) => block.match(/href="#(E[0-9A-F]{3})/)?.[1] || null)
+        }
+
+        const ebMajorMei = makeSingleStaffMei("3f", '<note dur="4" oct="4" pname="e" accid.ges="f"/><note dur="4" oct="4" pname="g"/><note dur="4" oct="4" pname="b" accid.ges="f"/><note dur="4" oct="5" pname="e" accid.ges="f"/>')
+        const fMajorMei = makeSingleStaffMei("1f", '<note dur="4" oct="4" pname="f"/><note dur="4" oct="4" pname="a"/><note dur="4" oct="5" pname="c"/><note dur="4" oct="5" pname="f"/>')
+
+        const ebBefore = await handleMessage({ type: "render", mei: ebMajorMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(ebBefore.svg)).toEqual(["E260", "E260", "E260"])
+
+        const ebUp2 = await handleMessage({ type: "render", mei: ebMajorMei, pageWidth: 1840, transpose: 2 })
+        const fDirect = await handleMessage({ type: "render", mei: fMajorMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        // Eb major up 2 semitones gives F major (1 flat, E260) and every notehead sits higher on the staff, matching F4-A4-C5-F5
+        expect(getKeyAccidGlyphs(ebUp2.svg)).toEqual(["E260"])
+        expect(getNoteheadYs(ebUp2.svg)).toEqual(getNoteheadYs(fDirect.svg))
+        expect(getNoteheadYs(ebUp2.svg).every((y, i) => y < getNoteheadYs(ebBefore.svg)[i])).toBe(true)
+
+        // Rendering again without transpose resets the toolkit and matches the pre-transpose SVG identically
+        const ebAfter = await handleMessage({ type: "render", mei: ebMajorMei, pageWidth: 1840 })
+        expect(ebAfter.svg).toBe(ebBefore.svg)
+
+        // C major down 3 semitones gives A major (3 sharps, E262) and matches A3-B3-C#4-D4
+        const cMajorMei = makeSingleStaffMei("0", '<note dur="4" oct="4" pname="c"/><note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="e"/><note dur="4" oct="4" pname="f"/>')
+        const aMajorMei = makeSingleStaffMei("3s", '<note dur="4" oct="3" pname="a"/><note dur="4" oct="3" pname="b"/><note dur="4" oct="4" pname="c" accid.ges="s"/><note dur="4" oct="4" pname="d"/>')
+        const cDown3 = await handleMessage({ type: "render", mei: cMajorMei, pageWidth: 1840, transpose: -3 })
+        const aDirect = await handleMessage({ type: "render", mei: aMajorMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(cDown3.svg)).toEqual(["E262", "E262", "E262"])
+        expect(getNoteheadYs(cDown3.svg)).toEqual(getNoteheadYs(aDirect.svg))
+
+        // F# in C major transposed up 2 semitones gives D major (2 sharps) with G# (sharp E262 on the G4 position, not Ab)
+        const cWithFSharpMei = makeSingleStaffMei("0", '<note dur="4" oct="4" pname="c"/><note dur="4" oct="4" pname="f" accid="s"/><note dur="4" oct="4" pname="g"/><note dur="4" oct="5" pname="c"/>')
+        const dWithGSharpMei = makeSingleStaffMei("2s", '<note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="g" accid="s"/><note dur="4" oct="4" pname="a"/><note dur="4" oct="5" pname="d"/>')
+        const fSharpUp2 = await handleMessage({ type: "render", mei: cWithFSharpMei, pageWidth: 1840, transpose: 2 })
+        const gSharpDirect = await handleMessage({ type: "render", mei: dWithGSharpMei, pageWidth: 1840 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(fSharpUp2.svg)).toEqual(["E262", "E262"])
+        expect(getNoteheadYs(fSharpUp2.svg)).toEqual(getNoteheadYs(gSharpDirect.svg))
+        expect(getNoteAccidGlyphs(fSharpUp2.svg)).toEqual([null, "E262", null, null])
+
+        // Fitted layouts (with ratio) keep distinct canonical memo entries per transpose value
+        const loaded = await handleMessage({ type: "load", text: SAMPLE_MUSICXML })
+        const fittedOriginal = await handleMessage({ type: "render", mei: loaded.mei, pageWidth: 500, ratio: 0.25 })
+        const fittedUp2 = await handleMessage({ type: "render", mei: loaded.mei, pageWidth: 500, ratio: 0.25, transpose: 2 })
+        expect(fittedUp2.svg).not.toBe(fittedOriginal.svg)
+        expect(getKeyAccidGlyphs(fittedOriginal.svg)).toEqual([])
+        expect(getKeyAccidGlyphs(fittedUp2.svg)).toEqual(["E262", "E262"])
+    })
+
+    it("chooses clean key spellings for key changes, six-accidental keys, +/-6, minor keys and every semitone -11..11", async () => {
+        const getKeySigGlyphGroups = (svg: string): string[][] => {
+            const keySigBlocks = svg.match(/<g[^>]*class="keySig"[^>]*>[\s\S]*?(?=<g[^>]*class="(?:meterSig|clef|layer|staff|measure)"|<\/g>\s*<\/g>)/g) || []
+            return keySigBlocks.map((block) => [...block.matchAll(/<g[^>]*class="keyAccid"[^>]*>[\s\S]*?href="#(E[0-9A-F]{3})/g)].map((m) => m[1]))
+        }
+
+        const getKeyAccidGlyphs = (svg: string): string[] => {
+            const keyAccidBlocks = svg.match(/<g[^>]*class="keyAccid"[^>]*>[\s\S]*?<\/g>/g) || []
+            return keyAccidBlocks.map((block) => block.match(/href="#(E[0-9A-F]{3})/)?.[1] || "")
+        }
+
+        // G major -> Eb major at -1 draws F# major (6 sharps) then D major (2 sharps), with no double flats
+        const gToEbMei =
+            `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score>` +
+            `<scoreDef keysig="1s" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef>` +
+            `<section><measure n="1"><staff n="1"><layer n="1"><note dur="1" oct="4" pname="g"/></layer></staff></measure>` +
+            `<scoreDef keysig="3f"/><measure n="2"><staff n="1"><layer n="1"><note dur="1" oct="4" pname="e" accid.ges="f"/></layer></staff></measure>` +
+            `</section></score></mdiv></body></music></mei>`
+        const gToEbDown1 = await handleMessage({ type: "render", mei: gToEbMei, pageWidth: 1840, transpose: -1 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        const gToEbGroups = getKeySigGlyphGroups(gToEbDown1.svg)
+        expect(gToEbGroups).toEqual([
+            ["E262", "E262", "E262", "E262", "E262", "E262"],
+            ["E262", "E262"]
+        ])
+        expect(gToEbDown1.svg).not.toContain("#E264")
+
+        // Eb major at +3 draws Gb major (6 flats), with no double sharps
+        const ebMei =
+            `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score>` +
+            `<scoreDef keysig="3f" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef>` +
+            `<section><measure n="1"><staff n="1"><layer n="1"><note dur="4" oct="4" pname="e" accid.ges="f"/><note dur="4" oct="4" pname="a"/><note dur="4" oct="4" pname="b" accid.ges="f"/><note dur="4" oct="5" pname="e" accid.ges="f"/></layer></staff></measure></section>` +
+            `</score></mdiv></body></music></mei>`
+        const ebUp3 = await handleMessage({ type: "render", mei: ebMei, pageWidth: 1840, transpose: 3 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(ebUp3.svg)).toEqual(["E260", "E260", "E260", "E260", "E260", "E260"])
+        expect(ebUp3.svg).not.toContain("#E263")
+
+        // C major at +6 and at -6 draw the same key signature (6 flats, Gb)
+        const cMei = `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score>` + `<scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef>` + `<section><measure n="1"><staff n="1"><layer n="1"><note dur="1" oct="4" pname="c"/></layer></staff></measure></section>` + `</score></mdiv></body></music></mei>`
+        const cPlus6 = await handleMessage({ type: "render", mei: cMei, pageWidth: 1840, transpose: 6 })
+        const cMinus6 = await handleMessage({ type: "render", mei: cMei, pageWidth: 1840, transpose: -6 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(cPlus6.svg)).toEqual(["E260", "E260", "E260", "E260", "E260", "E260"])
+        expect(getKeyAccidGlyphs(cMinus6.svg)).toEqual(getKeyAccidGlyphs(cPlus6.svg))
+
+        // Minor key (D minor, 1 flat) up 1 draws Eb minor (6 flats) and up 2 draws E minor (1 sharp)
+        const dMinorMei =
+            `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score>` +
+            `<scoreDef keysig="1f" key.mode="minor" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef>` +
+            `<section><measure n="1"><staff n="1"><layer n="1"><note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="f"/><note dur="4" oct="4" pname="a"/><note dur="4" oct="5" pname="c" accid="s"/></layer></staff></measure></section>` +
+            `</score></mdiv></body></music></mei>`
+        const dMinorUp1 = await handleMessage({ type: "render", mei: dMinorMei, pageWidth: 1840, transpose: 1 })
+        const dMinorUp2 = await handleMessage({ type: "render", mei: dMinorMei, pageWidth: 1840, transpose: 2 })
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(getKeyAccidGlyphs(dMinorUp1.svg)).toEqual(["E260", "E260", "E260", "E260", "E260", "E260"])
+        expect(getKeyAccidGlyphs(dMinorUp2.svg)).toEqual(["E262"])
+
+        // A single-key hymn (Eb major) at every value from -11 to 11 never gets more than six accidentals
+        for (let step = -11; step <= 11; step++) {
+            const rendered = await handleMessage({ type: "render", mei: ebMei, pageWidth: 1840, transpose: step })
+            expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+            const keyAccids = getKeyAccidGlyphs(rendered.svg)
+            expect(keyAccids.length).toBeLessThanOrEqual(6)
+        }
+    })
 })

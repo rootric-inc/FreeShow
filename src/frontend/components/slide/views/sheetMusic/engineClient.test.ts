@@ -9,6 +9,7 @@ interface PostedMessage {
     pageWidth?: number
     ratio?: number
     showMeasureNumbers?: boolean
+    transpose?: number
     text?: string
     first?: number
     last?: number
@@ -128,6 +129,38 @@ describe("sheetMusic engine client", () => {
         await expect(renderMusic("<mei>same</mei>", 1840)).resolves.toEqual({ svg: "<svg>plain</svg>", scale: 1, fits: true, pages: 1 })
         await expect(renderMusic("<mei>same</mei>", 1840, undefined, undefined, { showMeasureNumbers: true })).resolves.toEqual({ svg: "<svg>numbered</svg>", scale: 1, fits: true, pages: 1 })
         expect(worker.posted).toHaveLength(2)
+    })
+
+    it("passes transpose to the worker and keeps different transpose values separate in flight and in cache", async () => {
+        const { renderMusic } = await import("./engine")
+
+        const pOriginal = renderMusic("<mei>hymn</mei>", 1840, 0.31)
+        const pUp2 = renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 2 })
+        const pDown3 = renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: -3 })
+
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toHaveLength(1)
+        expect(worker.posted[0].transpose).toBeUndefined()
+
+        worker.emitMessage({ id: worker.posted[0].id, ok: true, result: { svg: "<svg>orig</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pOriginal).resolves.toEqual({ svg: "<svg>orig</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(2)
+        expect(worker.posted[1].transpose).toBe(2)
+        worker.emitMessage({ id: worker.posted[1].id, ok: true, result: { svg: "<svg>up2</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pUp2).resolves.toEqual({ svg: "<svg>up2</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(3)
+        expect(worker.posted[2].transpose).toBe(-3)
+        worker.emitMessage({ id: worker.posted[2].id, ok: true, result: { svg: "<svg>down3</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pDown3).resolves.toEqual({ svg: "<svg>down3</svg>", scale: 1, fits: true, pages: 1 })
+
+        // Subsequent calls hit their own cache entries; transpose 0 and out-of-range share the original entry
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 0 })).resolves.toEqual({ svg: "<svg>orig</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 15 })).resolves.toEqual({ svg: "<svg>orig</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 2 })).resolves.toEqual({ svg: "<svg>up2</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: -3 })).resolves.toEqual({ svg: "<svg>down3</svg>", scale: 1, fits: true, pages: 1 })
+        expect(worker.posted).toHaveLength(3)
     })
 
     it("surfaces ok:false worker errors with their code and maps every worker code to a real en.json key", async () => {

@@ -2,7 +2,6 @@
     import { onMount } from "svelte"
     import type { MediaStyle } from "../../../../types/Main"
     import { activeEdit, activePopup, activeShow, alertMessage, editMode, focusMode, media, outputs, overlays, playerVideos, resized, showsCache, slideNotesActive, special, styles } from "../../../stores"
-    import { transposeText } from "../../../utils/chordTranspose"
     import { DEFAULT_WIDTH } from "../../../utils/common"
     import { translateText } from "../../../utils/language"
     import { getAccess } from "../../../utils/profile"
@@ -19,12 +18,11 @@
     import FloatingInputs from "../../input/FloatingInputs.svelte"
     import MaterialButton from "../../inputs/MaterialButton.svelte"
     import MaterialZoom from "../../inputs/MaterialZoom.svelte"
-    import { formatText } from "../../show/formatTextEditor"
-    import { getPlainEditorText } from "../../show/getTextEditor"
     import Notes from "../../show/tools/Notes.svelte"
     import Textbox from "../../slide/Textbox.svelte"
     import Zoomed from "../../slide/Zoomed.svelte"
     import { getStyleResolution } from "../../slide/getStyleResolution"
+    import { showHasSheetMusic as hasShowSheetMusic } from "../../slide/views/sheetMusic/helpers"
     import Center from "../../system/Center.svelte"
     import DropArea from "../../system/DropArea.svelte"
     import Resizeable from "../../system/Resizeable.svelte"
@@ -32,7 +30,7 @@
     import Timeline from "../../timeline/Timeline.svelte"
     import EditHeader from "../EditHeader.svelte"
     import Editbox from "../editbox/Editbox.svelte"
-    import { getShowChords, getUsedChords } from "../scripts/chords"
+    import { getShowChords, getUsedChords, transposeShow } from "../scripts/chords"
     import { addItem } from "../scripts/itemHelpers"
     import { setCaretAtEnd } from "../scripts/textStyle"
     import { centerZoom } from "../scripts/zoom"
@@ -223,14 +221,14 @@
         }
     }
 
-    // transpose chords - same as TextEditor
+    $: showHasSheetMusic = hasShowSheetMusic(currentShow)
+
+    // transpose chords and sheet music - same as TextEditor
     function transposeUp() {
-        const text = getPlainEditorText("", false)
-        formatText(transposeText(text, 1), currentShowId)
+        transposeShow(currentShowId, 1)
     }
     function transposeDown() {
-        const text = getPlainEditorText("", false)
-        formatText(transposeText(text, -1), currentShowId)
+        transposeShow(currentShowId, -1)
     }
 
     $: slideFilter = getSlideFilter(layoutSlide)
@@ -397,7 +395,7 @@
     {/if}
 
     {#if !$focusMode && !isLocked && !$slideNotesActive && !$special.slideTimelineActive}
-        <FloatingInputs side="left" bottom={notesVisible ? bottomHeight : 10} onlyOne={$editMode !== "chords" && hasBackground}>
+        <FloatingInputs side="left" bottom={notesVisible ? bottomHeight : 10} onlyOne={$editMode !== "chords" && !showHasSheetMusic && hasBackground}>
             {#if $editMode === "chords"}
                 <MaterialButton on:click={transposeUp} title="edit.transpose_up">
                     <Icon id="arrow_up" size={1.3} white />
@@ -417,6 +415,24 @@
                         {chord}
                     </MaterialButton>
                 {/each}
+            {:else if showHasSheetMusic}
+                <MaterialButton on:click={transposeUp} title="edit.transpose_up">
+                    <Icon id="arrow_up" size={1.3} white />
+                </MaterialButton>
+                <MaterialButton on:click={transposeDown} title="edit.transpose_down">
+                    <Icon id="arrow_down" size={1.3} white />
+                </MaterialButton>
+
+                {#if hasBackground}
+                    <div class="divider"></div>
+
+                    <MaterialButton on:click={convertBackgroundToMedia}>
+                        <Icon id="autofill" gradient />
+                        <T id="edit.convert_to_media_item" />
+                    </MaterialButton>
+                {:else}
+                    <div class="divider"></div>
+                {/if}
             {:else if hasBackground}
                 <MaterialButton on:click={convertBackgroundToMedia}>
                     <Icon id="autofill" gradient />

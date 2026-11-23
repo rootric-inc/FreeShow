@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -170,15 +170,17 @@ export async function handleMessage(message) {
     }
 
     if (type === "render") {
-        const { mei, pageWidth, ratio, showMeasureNumbers } = message
+        const { mei, pageWidth, ratio, showMeasureNumbers, transpose } = message
         if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
         const clampedWidth = Math.max(MIN_PAGE_WIDTH, Math.min(MAX_PAGE_WIDTH, parsedWidth))
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
         const drawMeasureNumbers = Boolean(showMeasureNumbers)
+        const transposeSemitones = typeof transpose === "number" && Number.isInteger(transpose) && transpose >= -11 && transpose <= 11 && transpose !== 0 ? transpose : 0
 
         const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
+        const transposeInterval = transposeSemitones !== 0 ? chooseTransposeInterval(renderMei, transposeSemitones) : ""
 
         try {
             let layoutCount = 0
@@ -187,7 +189,9 @@ export async function handleMessage(message) {
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                const renderOptions = drawMeasureNumbers ? { ...RENDER_OPTIONS, minLastJustification, pageWidth: width, mnumInterval: 1 } : { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                const renderOptions = { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                if (drawMeasureNumbers) renderOptions.mnumInterval = 1
+                if (transposeInterval) renderOptions.transpose = transposeInterval
                 tk.setOptions(renderOptions)
                 tk.getLog()
                 const loaded = tk.loadData(renderMei)
@@ -226,7 +230,7 @@ export async function handleMessage(message) {
                 }
             }
 
-            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${mei}`
+            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
             const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical })
 
