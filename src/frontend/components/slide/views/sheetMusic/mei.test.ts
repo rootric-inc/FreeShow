@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
+    MAX_PAGE_WIDTH,
     applyInitialMeter,
+    widenPageForRatio,
     calculateLyricWordSpace,
     getRowWidths,
     chooseRowStarts,
@@ -328,6 +330,13 @@ describe("mei pure helpers", () => {
         // the width of each row
         expect(getRowWidths([677, 283, 507, 178, 421], plus([677, 283, 507, 178, 421], 130), [3])).toEqual([1090, 1236])
         expect(getRowWidths([100, 100, 100], [150, 150, 150], [])).toEqual([350])
+
+        // a drawing 1 percent too tall fits on a page 1 percent wider, and one 5 percent too tall is given up
+        expect(widenPageForRatio(1000, 0.444, 0.44, 1.02)).toBe(1010)
+        expect(widenPageForRatio(1000, 0.4484, 0.44, 1.02)).toBe(1020)
+        expect(widenPageForRatio(1000, 0.449, 0.44, 1.02)).toBeNull()
+        expect(widenPageForRatio(1000, 0.462, 0.44, 1.02)).toBeNull()
+        expect(widenPageForRatio(MAX_PAGE_WIDTH, 0.4444, 0.44, 1.02)).toBeNull()
         expect(chooseRowStarts([100, 200, 300], [100, 200, 300], 5)).toEqual([2, 3])
         // Tie on widest row (120) breaks by maximizing the narrowest row (30 over 20)
         expect(chooseRowStarts([10, 10, 10, 30], [20, 80, 100, 120], 3)).toEqual([3, 4])

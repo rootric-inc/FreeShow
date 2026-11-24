@@ -488,7 +488,7 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(drawnNumbers).toEqual(Array.from({ length: 16 }, (_, i) => String(i + 1)))
     })
 
-    it("fills the full width on a one-row drawing and leaves a short last row natural on a two-row drawing (F1)", async () => {
+    it("fills the full width on a one-row drawing and spreads the bars of a two-row drawing evenly (F1)", async () => {
         const makeBar = (n: number) => `<measure n="${n}"><staff n="1"><layer n="1"><note dur="4" oct="4" pname="c"/><note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="e"/><note dur="4" oct="4" pname="f"/></layer></staff></measure>`
         const makeMei = (barCount: number) => `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section>${Array.from({ length: barCount }, (_, i) => makeBar(i + 1)).join("")}</section></score></mdiv></body></music></mei>`
 
@@ -856,6 +856,16 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         // Without the key change the same bars are spread two over three
         const spread = await handleMessage({ type: "render", mei: piece([1, 2, 3, 4, 5].map((n) => bar(n, whole("e"))).join("")), pageWidth: 880 })
         expect(readSvgRowStarts(spread.svg)).toEqual([3])
+
+        // A line of five bars with five verses, where the last two bars hold one long note without words. Four bars over
+        // one leaves a short last row, but three over two puts five rows of words under the second row too. That is too
+        // tall for the box, and a page wide enough for it would make the words much smaller. The rows stay.
+        const fiveVerses = ["T: Were You There", "M: none", "L: 1/4", "K: E", "B2 B B | c B B3/2 G/ | F4 | (B2 e3/2 c/ | B4) |", "w: there when they cru-ci-fied my Lord? * * * *", "w: there when they nailed Him to the tree? * * * *", "w: there when they pierced Him in the side? Oh! * * *", "w: there when the sun re-fused to shine? * * * *", "w: there when they laid Him in the tomb? * * * *"].join("\n")
+        const fiveVersesMei = convertAndCheckAbc(fiveVerses, abcjs.parseOnly).mei
+        const tall = await handleMessage({ type: "render", mei: fiveVersesMei, pageWidth: 1170, ratio: 800 / 1820, lyricSize: 150 })
+        expect(getLastRenderLog()).toBe("")
+        expect(tall.fits).toBe(true)
+        expect(readSvgRowStarts(tall.svg)).toEqual([5])
 
         // Eight equal bars that fill two rows are not measured, and the rows stay as they are
         const equalBars = piece([1, 2, 3, 4, 5, 6, 7, 8].map((n) => bar(n, halves("e", "g"))).join(""))

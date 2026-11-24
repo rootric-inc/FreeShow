@@ -968,6 +968,13 @@ export function getRowWidths(plainWidths, startWidths, rowStarts) {
     })
 }
 
+// The page width at which a drawing that is a little too tall for its box fits again: a wider page makes the drawing
+// lower in proportion. Returns null when that takes a page more than maxGrowth times as wide.
+export function widenPageForRatio(pageWidth, ratio, maxRatio, maxGrowth) {
+    const widerWidth = Math.ceil((pageWidth * ratio) / maxRatio)
+    return widerWidth <= Math.min(MAX_PAGE_WIDTH, pageWidth * maxGrowth) ? widerWidth : null
+}
+
 // The least gap between two words for a words size in percent. Verovio lets large words touch unless the gap grows
 // much faster than the words, so it reaches its full value at 150 and stays there.
 export function calculateLyricWordSpace(lyricSize, minWordSpace = 1.2, maxWordSpace = 3.2) {

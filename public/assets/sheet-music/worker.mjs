@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseRowStarts, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, getRowWidths, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, insertSystemBreaks, normalizeMei, parseSvgViewBox, readSvgMeasureWidths, readSvgRowStarts, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseRowStarts, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, getRowWidths, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, insertSystemBreaks, normalizeMei, parseSvgViewBox, readSvgMeasureWidths, readSvgRowStarts, sanitizeSvg, svgFitsWidth, widenPageForRatio } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -22,7 +22,6 @@ const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
 const MEASURE_PAGE_WIDTH = 60000
 // The last row is stretched to the full width when it is at least this share of the widest row
 const MIN_LAST_ROW_SHARE = 0.5
-const MAX_EVEN_ROW_GROWTH = 1.02
 // Even rows may widen the page by this much to keep the drawing inside its box, which makes everything that much smaller
 const MAX_EVEN_ROWS_WIDENING = 1.02
 const DEFAULT_LYRIC_SIZE = 100
@@ -281,19 +280,21 @@ export async function handleMessage(message) {
                     const rowStarts = chooseRowStarts(plainWidths, startWidths, currentStarts.length + 1)
                     if (rowStarts.length !== currentStarts.length) return null
 
-                    // Verovio squeezes a row that is too full. The bars' widths miss what a row gets at its end, such as the new
-                    // key before a key change, so the rows are measured as they will be drawn: the widest of the even rows may
-                    // not be wider than the widest row now.
-                    if (rowStarts.some((start, index) => start !== currentStarts[index])) {
-                        const evenWidths = measureBarWidths(rowStarts)
-                        const currentWidths = measureBarWidths(currentStarts)
-                        if (!evenWidths || !currentWidths) return null
-                        const widest = (widths, starts) => Math.max(...getRowWidths(widths, widths, starts))
-                        if (widest(evenWidths, rowStarts) > widest(currentWidths, currentStarts) * MAX_EVEN_ROW_GROWTH) return null
-                    }
-
                     const rowWidths = getRowWidths(plainWidths, startWidths, rowStarts)
                     const lastRowIsShort = rowWidths[rowWidths.length - 1] < Math.max(...rowWidths) * MIN_LAST_ROW_SHARE
+                    // The rows are even already. Only the last row is stretched, unless it is too short for that.
+                    if (rowStarts.every((start, index) => start === currentStarts[index])) return lastRowIsShort ? null : { ...runLayout(width, 0), pageWidth: width }
+
+                    // Verovio squeezes a row that is too full. The bars' widths miss what a row gets at its end, such as the new
+                    // key before a key change, so the rows are measured as they will be drawn: the widest of the even rows must
+                    // fit the page, or be no wider than the widest row now.
+                    const evenWidths = measureBarWidths(rowStarts)
+                    const currentWidths = measureBarWidths(currentStarts)
+                    const drawnWidths = readSvgMeasureWidths(result.svg)
+                    if (!evenWidths || !currentWidths || drawnWidths.length !== evenWidths.length) return null
+                    const widest = (widths, starts) => Math.max(...getRowWidths(widths, widths, starts))
+                    if (widest(evenWidths, rowStarts) > Math.max(widest(currentWidths, currentStarts), widest(drawnWidths, currentStarts))) return null
+
                     const evenMei = insertSystemBreaks(renderMei, rowStarts)
                     const currentBox = parseSvgViewBox(result.svg)
                     if (!currentBox) return null
@@ -310,8 +311,8 @@ export async function handleMessage(message) {
                     let even = drawAt(width)
                     if (even && even.ratio > maxRatio) {
                         // A slightly wider page makes up for a little more height, at a small cost in size
-                        const widerWidth = Math.ceil((width * even.ratio) / maxRatio)
-                        even = widerWidth <= Math.min(MAX_PAGE_WIDTH, width * MAX_EVEN_ROWS_WIDENING) ? drawAt(widerWidth) : null
+                        const widerWidth = widenPageForRatio(width, even.ratio, maxRatio, MAX_EVEN_ROWS_WIDENING)
+                        even = widerWidth === null ? null : drawAt(widerWidth)
                     }
                     if (!even || even.ratio > maxRatio) return null
 
