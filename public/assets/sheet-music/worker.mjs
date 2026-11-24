@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, chooseRowStarts, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, insertSystemBreaks, normalizeMei, parseSvgViewBox, readSvgMeasureWidths, readSvgRowStarts, sanitizeSvg, scaleLyricOption, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -19,6 +19,7 @@ const RENDER_OPTIONS = {
 }
 
 const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
+const MEASURE_PAGE_WIDTH = 60000
 const DEFAULT_LYRIC_SIZE = 100
 const MIN_LYRIC_SIZE = 100
 const MAX_LYRIC_SIZE = 175
@@ -26,6 +27,8 @@ const VEROVIO_DEFAULT_LYRIC_SIZE = 4.5
 const VEROVIO_MAX_LYRIC_SIZE = 8.0
 const VEROVIO_DEFAULT_LYRIC_WORD_SPACE = 1.2
 const VEROVIO_MAX_LYRIC_WORD_SPACE = 3.2
+const VEROVIO_DEFAULT_LYRIC_TOP_MIN_MARGIN = 2
+const VEROVIO_MAX_LYRIC_TOP_MIN_MARGIN = 5
 // Small margins give large words more of the box. A brace or bracket hangs left of the staves and needs the full
 // left margin, and a last syllable can hang past the last note, so the right margin stays a little wider.
 const LARGE_LYRIC_PAGE_MARGIN = 10
@@ -39,7 +42,8 @@ export function getLyricRenderOptions(lyricSize, hasGroupSymbol = false) {
     if (lyricSizePercent <= DEFAULT_LYRIC_SIZE) return {}
     return {
         lyricSize: Math.min(VEROVIO_MAX_LYRIC_SIZE, (VEROVIO_DEFAULT_LYRIC_SIZE * lyricSizePercent) / 100),
-        lyricWordSpace: calculateLyricWordSpace(lyricSizePercent, VEROVIO_DEFAULT_LYRIC_WORD_SPACE, VEROVIO_MAX_LYRIC_WORD_SPACE),
+        lyricWordSpace: scaleLyricOption(lyricSizePercent, VEROVIO_DEFAULT_LYRIC_WORD_SPACE, VEROVIO_MAX_LYRIC_WORD_SPACE),
+        lyricTopMinMargin: scaleLyricOption(lyricSizePercent, VEROVIO_DEFAULT_LYRIC_TOP_MIN_MARGIN, VEROVIO_MAX_LYRIC_TOP_MIN_MARGIN),
         pageMarginTop: LARGE_LYRIC_PAGE_MARGIN,
         pageMarginBottom: LARGE_LYRIC_PAGE_MARGIN,
         pageMarginLeft: hasGroupSymbol ? GROUP_SYMBOL_LEFT_MARGIN : LARGE_LYRIC_PAGE_MARGIN,
@@ -220,17 +224,18 @@ export async function handleMessage(message) {
 
         try {
             let layoutCount = 0
-            const runLayout = (width, minLastJustification) => {
+            const runLayout = (width, minLastJustification, overrides = null) => {
                 layoutCount++
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width }
+                const { mei: meiInput = renderMei, ...extraOptions } = overrides || {}
+                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width, ...extraOptions }
                 if (drawMeasureNumbers) renderOptions.mnumInterval = 1
                 if (transposeInterval) renderOptions.transpose = transposeInterval
                 tk.setOptions(renderOptions)
                 tk.getLog()
-                const loaded = tk.loadData(renderMei)
+                const loaded = tk.loadData(meiInput)
                 if (!loaded) {
                     lastRenderLog = tk.getLog().trim()
                     throw createWorkerError("render_failed", "Could not render music")
@@ -245,11 +250,73 @@ export async function handleMessage(message) {
 
             const renderSearchAt = (width) => runLayout(width, RENDER_OPTIONS.minLastJustification)
 
-            const finalizeLayout = (result, width) => {
-                if (result.pages > 1 || countSvgSystems(result.svg) > 1) {
-                    return runLayout(width, MULTI_ROW_MIN_LAST_JUSTIFICATION)
+            const tryEvenRows = (result, width, rowCount) => {
+                try {
+                    const measureCount = countMeasures(renderMei)
+                    const currentStarts = readSvgRowStarts(result.svg)
+                    if (measureCount < rowCount || currentStarts.length !== rowCount - 1) return null
+
+                    const plain = runLayout(MEASURE_PAGE_WIDTH, RENDER_OPTIONS.minLastJustification, { breaks: "none", noJustification: true, adjustPageWidth: true })
+                    if (plain.pages !== 1) return null
+                    const plainWidths = readSvgMeasureWidths(plain.svg)
+                    if (plainWidths.length !== measureCount || plainWidths.some((w) => !Number.isFinite(w) || w <= 0)) return null
+
+                    const allStarts = Array.from({ length: measureCount - 1 }, (_, i) => i + 2)
+                    const solo = runLayout(MEASURE_PAGE_WIDTH, RENDER_OPTIONS.minLastJustification, { mei: insertSystemBreaks(renderMei, allStarts), breaks: "encoded", noJustification: true, adjustPageWidth: true })
+                    if (solo.pages !== 1 || countSvgSystems(solo.svg) !== measureCount) return null
+                    const startWidths = readSvgMeasureWidths(solo.svg)
+                    if (startWidths.length !== measureCount || startWidths.some((w) => !Number.isFinite(w) || w <= 0)) return null
+
+                    const chosenStarts = chooseRowStarts(plainWidths, startWidths, rowCount)
+                    if (chosenStarts.length !== currentStarts.length) return null
+
+                    const bounds = [1, ...chosenStarts, measureCount + 1]
+                    const rowWidths = bounds.slice(0, -1).map((start, i) => {
+                        let sum = startWidths[start - 1]
+                        for (let bar = start; bar < bounds[i + 1] - 1; bar++) sum += plainWidths[bar]
+                        return sum
+                    })
+                    const widestRow = Math.max(...rowWidths)
+                    const lastRow = rowWidths[rowWidths.length - 1]
+                    const minLastJustification = lastRow >= widestRow * 0.5 ? 0 : 1
+                    const brokenMei = insertSystemBreaks(renderMei, chosenStarts)
+
+                    const accept = (candidate, candidateWidth) => {
+                        if (candidate.pages !== 1 || countSvgSystems(candidate.svg) !== rowCount) return null
+                        if (!svgFitsWidth(candidate.svg, lyricOptions.pageMarginRight)) return null
+                        if (targetRatio === null) return { svg: candidate.svg, pages: candidate.pages, pageWidth: candidateWidth, fits: true }
+                        const box = parseSvgViewBox(candidate.svg)
+                        if (!box) return null
+                        const actualRatio = box.height / box.width
+                        if (actualRatio <= targetRatio) return { svg: candidate.svg, pages: candidate.pages, pageWidth: candidateWidth, fits: true }
+                        return { ratioFailed: true, actualRatio }
+                    }
+
+                    const first = runLayout(width, minLastJustification, { mei: brokenMei, breaks: "encoded" })
+                    const firstCheck = accept(first, width)
+                    if (!firstCheck) return null
+                    if (!firstCheck.ratioFailed) return firstCheck
+
+                    const widenedWidth = Math.min(MAX_PAGE_WIDTH, Math.ceil((width * firstCheck.actualRatio) / targetRatio))
+                    if (widenedWidth <= width) return null
+                    const second = runLayout(widenedWidth, minLastJustification, { mei: brokenMei, breaks: "encoded" })
+                    const secondCheck = accept(second, widenedWidth)
+                    return secondCheck && !secondCheck.ratioFailed ? secondCheck : null
+                } catch {
+                    return null
                 }
-                return result
+            }
+
+            const finalizeLayout = (result, width) => {
+                const rowCount = countSvgSystems(result.svg)
+                if (result.pages === 1 && rowCount > 1) {
+                    const balanced = tryEvenRows(result, width, rowCount)
+                    if (balanced) return balanced
+                }
+                if (result.pages > 1 || rowCount > 1) {
+                    return { ...runLayout(width, MULTI_ROW_MIN_LAST_JUSTIFICATION), pageWidth: width }
+                }
+                return { ...result, pageWidth: width }
             }
 
             if (targetRatio === null) {
@@ -259,7 +326,7 @@ export async function handleMessage(message) {
                 const cleanSvg = sanitizeSvg(finalResult.svg)
                 return {
                     svg: cleanSvg,
-                    pageWidth: clampedWidth,
+                    pageWidth: finalResult.pageWidth,
                     scale: 1,
                     fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg, lyricOptions.pageMarginRight),
                     pages: finalResult.pages
@@ -275,44 +342,56 @@ export async function handleMessage(message) {
 
             let finalSvg
             let finalPages = fitted.pages
+            let finalPageWidth = fitted.pageWidth
+            let finalFits = fitted.fits
 
             if (usedCachedCanonical) {
                 finalSvg = cachedCanonical.svg
                 finalPages = cachedCanonical.pages
+                finalPageWidth = cachedCanonical.pageWidth
+                finalFits = cachedCanonical.fits
             } else {
                 const finalized = finalizeLayout({ svg: fitted.svg, pages: fitted.pages }, fitted.pageWidth)
                 finalSvg = sanitizeSvg(finalized.svg)
                 finalPages = finalized.pages
+                finalPageWidth = finalized.pageWidth
+                if (finalized.fits !== undefined) finalFits = finalized.fits
             }
 
             if (!cachedCanonical && fitted.canonical && !fitted.canonical.timedOut) {
                 let cleanCanonicalSvg
                 let canonicalPages = fitted.canonical.pages
+                let canonicalPageWidth = fitted.canonical.pageWidth
+                let canonicalFits = fitted.canonical.fits
                 if (usedFreshCanonical) {
                     cleanCanonicalSvg = finalSvg
                     canonicalPages = finalPages
+                    canonicalPageWidth = finalPageWidth
+                    canonicalFits = finalFits
                 } else {
                     const finalizedCanonical = finalizeLayout({ svg: fitted.canonical.svg, pages: fitted.canonical.pages }, fitted.canonical.pageWidth)
                     cleanCanonicalSvg = sanitizeSvg(finalizedCanonical.svg)
                     canonicalPages = finalizedCanonical.pages
+                    canonicalPageWidth = finalizedCanonical.pageWidth
+                    if (finalizedCanonical.fits !== undefined) canonicalFits = finalizedCanonical.fits
                 }
                 setCanonicalMemo(canonicalKey, {
                     svg: cleanCanonicalSvg,
-                    pageWidth: fitted.canonical.pageWidth,
+                    pageWidth: canonicalPageWidth,
                     pages: canonicalPages,
-                    fits: fitted.canonical.fits,
+                    fits: canonicalFits,
                     canonicalLayouts: fitted.canonical.canonicalLayouts,
                     timedOut: false
                 })
             }
 
             lastRenderLayouts = layoutCount
-            const scale = Math.min(1, clampedWidth / fitted.pageWidth)
+            const scale = Math.min(1, clampedWidth / finalPageWidth)
             return {
                 svg: finalSvg,
-                pageWidth: fitted.pageWidth,
+                pageWidth: finalPageWidth,
                 scale,
-                fits: fitted.fits,
+                fits: finalFits,
                 pages: finalPages
             }
         } catch (err) {

@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, measureSvgWidth, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import {
+    applyInitialMeter,
+    chooseRowStarts,
+    chooseTransposeInterval,
+    countMeasures,
+    extractHeaderMetadata,
+    extractKeySignatures,
+    extractTitle,
+    findFittingLayout,
+    getActiveMeterAtMeasure,
+    hasMeterChangeAtMeasure,
+    hideInitialMeter,
+    hideMeasureNumbers,
+    insertSlicePageBreaks,
+    insertSystemBreaks,
+    measureSvgWidth,
+    normalizeMei,
+    parseKeySigFifths,
+    parseSvgViewBox,
+    readSvgMeasureWidths,
+    readSvgRowStarts,
+    sanitizeSvg,
+    scaleLyricOption,
+    svgFitsWidth
+} from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -277,17 +301,64 @@ describe("mei pure helpers", () => {
         expect(chooseTransposeInterval(cMajor, 12)).toBe("")
     })
 
-    it("calculates lyricWordSpace linearly from 1.2 at 100 to 3.2 at 150 and clamps outside the range", () => {
-        expect(calculateLyricWordSpace(100)).toBe(1.2)
-        expect(calculateLyricWordSpace(125)).toBe(2.2)
-        expect(calculateLyricWordSpace(150)).toBe(3.2)
-        expect(calculateLyricWordSpace(175)).toBe(3.2)
-        expect(calculateLyricWordSpace(99)).toBe(1.2)
-        expect(calculateLyricWordSpace(50)).toBe(1.2)
-        expect(calculateLyricWordSpace(0)).toBe(1.2)
-        expect(calculateLyricWordSpace(-25)).toBe(1.2)
-        expect(calculateLyricWordSpace(250)).toBe(3.2)
-        expect(calculateLyricWordSpace(Number.NaN)).toBe(1.2)
-        expect(calculateLyricWordSpace(undefined)).toBe(1.2)
+    it("scales lyric spacing options linearly from 100 to 150 and clamps outside the range", () => {
+        expect(scaleLyricOption(100, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(125, 1.2, 3.2)).toBe(2.2)
+        expect(scaleLyricOption(150, 1.2, 3.2)).toBe(3.2)
+        expect(scaleLyricOption(175, 1.2, 3.2)).toBe(3.2)
+        expect(scaleLyricOption(99, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(50, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(0, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(-25, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(250, 1.2, 3.2)).toBe(3.2)
+        expect(scaleLyricOption(Number.NaN, 1.2, 3.2)).toBe(1.2)
+        expect(scaleLyricOption(undefined, 1.2, 3.2)).toBe(1.2)
+
+        expect(scaleLyricOption(100, 2, 6)).toBe(2)
+        expect(scaleLyricOption(125, 2, 6)).toBe(4)
+        expect(scaleLyricOption(150, 2, 6)).toBe(6)
+        expect(scaleLyricOption(175, 2, 6)).toBe(6)
+    })
+
+    it("chooses row starts that minimize the widest row, break ties by widest narrowest row, then earliest break", () => {
+        const plus = (widths: number[], add: number) => widths.map((w) => w + add)
+
+        expect(chooseRowStarts([677, 283, 507, 178, 421], plus([677, 283, 507, 178, 421], 130), 2)).toEqual([3])
+        expect(chooseRowStarts([340, 319, 410, 346, 353], plus([340, 319, 410, 346, 353], 130), 2)).toEqual([4])
+        expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 2)).toEqual([3])
+        expect(chooseRowStarts([100, 100, 100], [100, 100, 100], 2)).toEqual([2])
+        expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 1)).toEqual([])
+        expect(chooseRowStarts([100, 200, 300], [100, 200, 300], 5)).toEqual([2, 3])
+        // Tie on widest row (120) breaks by maximizing the narrowest row (30 over 20)
+        expect(chooseRowStarts([10, 10, 10, 30], [20, 80, 100, 120], 3)).toEqual([3, 4])
+    })
+
+    it("reads bar widths and row starts from an SVG", () => {
+        const svg =
+            `<svg viewBox="0 0 1000 500"><g class="page-margin">` +
+            `<g class="system">` +
+            `<g class="measure"><g class="staff"><path d="M0 100 L300 100"/><path d="M0 120 L300 120"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M300 100 L550 100"/></g></g>` +
+            `</g>` +
+            `<g class="system">` +
+            `<g class="measure"><g class="staff"><path d="M0 300 L420 300"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M420 300 L700 300"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M700 300 L950 300"/></g></g>` +
+            `</g>` +
+            `</g></svg>`
+
+        expect(readSvgMeasureWidths(svg)).toEqual([300, 250, 420, 280, 250])
+        expect(readSvgRowStarts(svg)).toEqual([3])
+        expect(readSvgRowStarts('<svg><g class="system"><g class="measure"/></g></svg>')).toEqual([])
+    })
+
+    it("strips existing system and page breaks and inserts sb tags before chosen measures", () => {
+        const plain = '<mei><section><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>'
+        const withOldBreaks = '<mei><section><pb/><measure n="1"><staff/></measure><sb n="1"/><measure n="2"><staff/></measure><pb n="2"></pb><sb></sb><measure n="3"><staff/></measure></section></mei>'
+
+        const expected = '<mei><section><measure n="1"><staff/></measure><measure n="2"><staff/></measure><sb/><measure n="3"><staff/></measure></section></mei>'
+        expect(insertSystemBreaks(plain, [3])).toBe(expected)
+        expect(insertSystemBreaks(withOldBreaks, [3])).toBe(expected)
+        expect(insertSystemBreaks(withOldBreaks, [1, 2, 3])).toBe('<mei><section><measure n="1"><staff/></measure><sb/><measure n="2"><staff/></measure><sb/><measure n="3"><staff/></measure></section></mei>')
     })
 })

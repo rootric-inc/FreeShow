@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import abcjs from "abcjs"
 import { beforeAll, describe, expect, it } from "vitest"
-import { parseSvgViewBox, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { parseSvgViewBox, readSvgRowStarts, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 import { convertAndCheckAbc } from "./abcToMei"
 import { calculatePageWidth, getItemRatioFromStyle } from "./helpers"
 import { filterMei, getMeasureNumbers, summarizeMei } from "./meiParts"
@@ -513,12 +513,13 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(oneRowStats.systemCount).toBe(1)
         expect(oneRowStats.maxX).toBeGreaterThan(oneRowStats.usableRight * 0.95)
 
-        // Two-row drawing with a short last row (5 bars at width 1200 -> 4 bars on row 1, 1 bar on row 2) ends well before the right edge
+        // Two-row drawing (5 bars at width 1200) spreads evenly into 2 and 3 bars and justifies the last row
         const twoRows = await handleMessage({ type: "render", mei: makeMei(5), pageWidth: 1200 })
         const twoRowStats = getLastSystemBarlineRight(twoRows.svg)
         expect(twoRowStats.systemCount).toBe(2)
-        expect(twoRowStats.maxX).toBeLessThan(twoRowStats.usableRight * 0.75)
-        expect(getLastRenderLayouts()).toBe(2)
+        expect(readSvgRowStarts(twoRows.svg)).toEqual([3])
+        expect(twoRowStats.maxX).toBeGreaterThan(twoRowStats.usableRight * 0.95)
+        expect(getLastRenderLayouts()).toBe(4)
 
         // Fitted one-row drawing fills full width in 1 layout
         const fittedOneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840, ratio: 0.4 })
@@ -527,14 +528,14 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(fittedOneRowStats.maxX).toBeGreaterThan(fittedOneRowStats.usableRight * 0.95)
         expect(getLastRenderLayouts()).toBe(1)
 
-        // Fitted multi-row drawing runs the second justification pass once on the chosen layout, not at every search step
+        // Fitted multi-row drawing balances rows once on the chosen layout, not at every search step
         const multiRowMei = makeMei(13)
         const fittedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
         const fittedMultiLayouts = getLastRenderLayouts()
         const fittedMultiStats = getLastSystemBarlineRight(fittedMulti.svg)
         expect(fittedMulti.fits).toBe(true)
         expect(fittedMultiStats.systemCount).toBeGreaterThan(1)
-        expect(fittedMultiStats.maxX).toBeLessThan(fittedMultiStats.usableRight * 0.75)
+        expect(fittedMultiStats.maxX).toBeGreaterThan(fittedMultiStats.usableRight * 0.95)
         expect(fittedMultiLayouts).toBeLessThanOrEqual(9)
 
         // Repeating the same fit request or a narrower preferred width reuses the finalized canonical drawing identically
@@ -773,9 +774,13 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
 
     it("tightens margins and sets lyric word space and staff spacing above 100, leaves 100 identical to omitted, logs nothing at 175, and clamps bad lyricSize values", async () => {
         expect(getLyricRenderOptions(100)).toEqual({})
+        expect(getLyricRenderOptions(100).lyricTopMinMargin).toBeUndefined()
+        expect(getLyricRenderOptions(125).lyricTopMinMargin).toBe(3.5)
+        expect(getLyricRenderOptions(150).lyricTopMinMargin).toBe(5)
         expect(getLyricRenderOptions(137.5)).toEqual({
             lyricSize: 6.1875,
             lyricWordSpace: 2.7,
+            lyricTopMinMargin: 4.25,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,
@@ -786,6 +791,7 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(getLyricRenderOptions(175)).toEqual({
             lyricSize: 7.875,
             lyricWordSpace: 3.2,
+            lyricTopMinMargin: 5,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,
@@ -830,5 +836,72 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(at50.svg).toBe(at100.svg)
         expect(asString.svg).toBe(at100.svg)
         expect(asNaN.svg).toBe(at100.svg)
+    })
+
+    it("spreads multi-row drawings evenly, stays deterministic with empty log, ignores existing breaks, and skips measuring one-row drawings", async () => {
+        const abideAbc = ["T: Abide With Me", "M: 4/4", "L: 1/4", "K: Eb", "%%score (S A) (T B)", "V: S", "V: A", "V: T clef=bass octave=-1", "V: B clef=bass octave=-1", "[V:S] G2 G F | E2 B2 | c B B A | G4 | G2 A B |", "w: 1.~A-bide with me; fast falls the e-ven-tide; The dark-ness", "[V:A] E2 D D | E2 E2 | E D E F | E4 | E2 E E |", "[V:T] B2 B A | G2 E2 | E B B B | B4 | B2 c B |", "[V:B] E2 B, B, | C2 G,2 | A, B, C D | E4 | E2 E E |"].join("\n")
+
+        const mei = convertAndCheckAbc(abideAbc, abcjs.parseOnly).mei
+        const boxWidth = calculatePageWidth(1820, 153)
+        const boxRatio = getItemRatioFromStyle("width: 1820px; height: 800px;")
+
+        const getRowStaffLineEnds = (svg: string): number[] => {
+            const systems = svg.split(/<g\b[^>]*\bclass="[^"]*\bsystem\b[^"]*"[^>]*>/).slice(1)
+            return systems.map((sys) => {
+                let lastEnd = 0
+                for (const match of sys.matchAll(/<g\b[^>]*\bclass="[^"]*\bstaff\b[^"]*"[^>]*>([\s\S]*?)<g\b/g)) {
+                    for (const line of match[1].matchAll(/\bd="M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+L\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)"/g)) {
+                        if (Number(line[2]) === Number(line[4])) {
+                            lastEnd = Math.max(Number(line[1]), Number(line[3]))
+                        }
+                    }
+                }
+                return lastEnd
+            })
+        }
+
+        const first = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 160 })
+        expect(getLastRenderLog()).toBe("")
+        expect(first.pages).toBe(1)
+        expect(first.fits).toBe(true)
+        expect(readSvgRowStarts(first.svg)).toEqual([3])
+        expect((first.svg.match(/<g\b[^>]*\bclass="measure"/g) || []).length).toBe(5)
+        const rowEnds = getRowStaffLineEnds(first.svg)
+        expect(rowEnds).toHaveLength(2)
+        expect(Math.abs(rowEnds[1] - rowEnds[0])).toBeLessThanOrEqual(5)
+
+        const vb = parseSvgViewBox(first.svg)
+        expect(vb).not.toBeNull()
+        expect(vb!.width).toBe(first.pageWidth)
+        expect(first.scale).toBeCloseTo(Math.min(1, boxWidth / first.pageWidth), 6)
+
+        // Same render twice gives the exact same drawing byte for byte with empty Verovio log
+        const second = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 160 })
+        expect(getLastRenderLog()).toBe("")
+        expect(second.svg).toBe(first.svg)
+        expect(second.pageWidth).toBe(first.pageWidth)
+        expect(second.scale).toBe(first.scale)
+
+        // Existing <sb/> and <pb/> elements in the MEI give the same rows as without them
+        let seen = 0
+        const meiWithBreaks = mei.replace(/<measure\b/g, (tag) => {
+            seen++
+            if (seen === 2) return `<pb/>${tag}`
+            if (seen === 4) return `<sb/>${tag}`
+            return tag
+        })
+        const withBreaks = await handleMessage({ type: "render", mei: meiWithBreaks, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 160 })
+        expect(readSvgRowStarts(withBreaks.svg)).toEqual(readSvgRowStarts(first.svg))
+
+        // Render without a ratio that has more than one row also gets even rows
+        const noRatio = await handleMessage({ type: "render", mei, pageWidth: first.pageWidth, lyricSize: 160 })
+        expect(readSvgRowStarts(noRatio.svg)).toEqual([3])
+        expect(parseSvgViewBox(noRatio.svg)!.width).toBe(noRatio.pageWidth)
+        expect(noRatio.scale).toBe(1)
+
+        // One-row drawing does not run the measuring drawings
+        const oneRow = await handleMessage({ type: "render", mei, pageWidth: 4000, lyricSize: 160 })
+        expect(readSvgRowStarts(oneRow.svg)).toEqual([])
+        expect(getLastRenderLayouts()).toBe(1)
     })
 })
