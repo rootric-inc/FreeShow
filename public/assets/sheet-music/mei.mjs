@@ -806,3 +806,10 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
         canonical
     }
 }
+
+export function calculateLyricWordSpace(lyricSize, minWordSpace = 1.2, maxWordSpace = 1.6) {
+    if (typeof lyricSize !== "number" || !Number.isFinite(lyricSize) || lyricSize <= 100) return minWordSpace
+    if (lyricSize >= 175) return maxWordSpace
+    const ratio = (lyricSize - 100) / (175 - 100)
+    return Math.round((minWordSpace + (maxWordSpace - minWordSpace) * ratio) * 1e6) / 1e6
+}

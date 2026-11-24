@@ -100,12 +100,14 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
     let handleMessage: (message: Record<string, unknown>) => Promise<any>
     let getLastRenderLog: () => string
     let getLastRenderLayouts: () => number
+    let getLyricRenderOptions: (lyricSize: unknown, hasGroupSymbol?: boolean) => Record<string, number>
 
     beforeAll(async () => {
         const mod = await import(/* @vite-ignore */ workerModuleHref)
         handleMessage = mod.handleMessage
         getLastRenderLog = mod.getLastRenderLog
         getLastRenderLayouts = mod.getLastRenderLayouts
+        getLyricRenderOptions = mod.getLyricRenderOptions
     })
 
     it("loads MusicXML into normalized MEI without meiHead and with bar.thru set to false", async () => {
@@ -677,6 +679,10 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
     })
 
     it("draws larger words with lyricSize, keeps 100 identical to omitted, resets after 175, and fits a box", async () => {
+        // A brace or bracket hangs left of the staves, so music that draws one keeps the full left margin
+        expect(getLyricRenderOptions(175, true).pageMarginLeft).toBe(50)
+        expect(getLyricRenderOptions(175, false).pageMarginLeft).toBe(10)
+
         const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
 
         const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
@@ -723,5 +729,66 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(fitted175.svg).not.toBe(fitted100.svg)
         expect(getSyllableFontSizes(fitted175.svg)[0]).toBeGreaterThan(getSyllableFontSizes(fitted100.svg)[0])
         expect(countSystems(fitted175.svg)).toBeGreaterThanOrEqual(countSystems(fitted100.svg))
+    })
+
+    it("tightens margins and sets lyric word space and staff spacing above 100, leaves 100 identical to omitted, logs nothing at 175, and clamps bad lyricSize values", async () => {
+        expect(getLyricRenderOptions(100)).toEqual({})
+        expect(getLyricRenderOptions(137.5)).toEqual({
+            lyricSize: 6.1875,
+            lyricWordSpace: 1.4,
+            pageMarginTop: 10,
+            pageMarginBottom: 10,
+            pageMarginLeft: 10,
+            pageMarginRight: 30,
+            spacingStaff: 4,
+            spacingBraceGroup: 4
+        })
+        expect(getLyricRenderOptions(175)).toEqual({
+            lyricSize: 7.875,
+            lyricWordSpace: 1.6,
+            pageMarginTop: 10,
+            pageMarginBottom: 10,
+            pageMarginLeft: 10,
+            pageMarginRight: 30,
+            spacingStaff: 4,
+            spacingBraceGroup: 4
+        })
+
+        const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
+        const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
+
+        const getFirstStaffLineLeftShare = (svg: string): number => {
+            const innerSvgMatch = svg.match(/<svg\b[^>]*\bclass="[^"]*\bdefinition-scale\b[^"]*"[^>]*>/)
+            const vbMatch = innerSvgMatch?.[0].match(/\bviewBox="([^"]+)"/)
+            const marginTagMatch = svg.match(/<g\b[^>]*\bclass="[^"]*\bpage-margin\b[^"]*"[^>]*>/)
+            const translateMatch = marginTagMatch?.[0].match(/\btransform="[^"]*translate\(\s*(-?\d+(?:\.\d+)?)/)
+            const staffMatch = svg.match(/<g\b[^>]*\bclass="[^"]*\bstaff\b[^"]*"[^>]*>([\s\S]*?)<g\b/)
+            const lineMatch = staffMatch?.[1].match(/\bd="M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+L\s*(-?\d+(?:\.\d+)?)\s+\2"/)
+            expect(vbMatch).not.toBeNull()
+            expect(translateMatch).not.toBeNull()
+            expect(lineMatch).not.toBeNull()
+            const innerWidth = Number(vbMatch![1].trim().split(/[\s,]+/)[2])
+            const marginX = Number(translateMatch![1])
+            const staffLeftX = Math.min(Number(lineMatch![1]), Number(lineMatch![3]))
+            return (marginX + staffLeftX) / innerWidth
+        }
+
+        const omitted = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+        const at100 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 100 })
+        const at175 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 175 })
+        expect(getLastRenderLog()).toBe("")
+
+        expect(at100.svg).toBe(omitted.svg)
+        expect(getFirstStaffLineLeftShare(at175.svg)).toBeLessThan(getFirstStaffLineLeftShare(at100.svg))
+
+        const at250 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 250 })
+        const at50 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 50 })
+        const asString = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: "175" })
+        const asNaN = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: Number.NaN })
+
+        expect(at250.svg).toBe(at175.svg)
+        expect(at50.svg).toBe(at100.svg)
+        expect(asString.svg).toBe(at100.svg)
+        expect(asNaN.svg).toBe(at100.svg)
     })
 })

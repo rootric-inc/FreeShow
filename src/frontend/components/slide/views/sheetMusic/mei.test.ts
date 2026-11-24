@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -266,5 +266,18 @@ describe("mei pure helpers", () => {
         expect(chooseTransposeInterval("<mei><section/></mei>", 2)).toBe("M2")
         expect(chooseTransposeInterval(cMajor, 0)).toBe("")
         expect(chooseTransposeInterval(cMajor, 12)).toBe("")
+    })
+
+    it("calculates lyricWordSpace linearly from 1.2 at 100 to 1.6 at 175 and clamps outside the range", () => {
+        expect(calculateLyricWordSpace(100)).toBe(1.2)
+        expect(calculateLyricWordSpace(137.5)).toBe(1.4)
+        expect(calculateLyricWordSpace(175)).toBe(1.6)
+        expect(calculateLyricWordSpace(99)).toBe(1.2)
+        expect(calculateLyricWordSpace(50)).toBe(1.2)
+        expect(calculateLyricWordSpace(0)).toBe(1.2)
+        expect(calculateLyricWordSpace(-25)).toBe(1.2)
+        expect(calculateLyricWordSpace(250)).toBe(1.6)
+        expect(calculateLyricWordSpace(Number.NaN)).toBe(1.2)
+        expect(calculateLyricWordSpace(undefined)).toBe(1.2)
     })
 })

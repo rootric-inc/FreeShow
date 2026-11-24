@@ -250,4 +250,39 @@ describe("sheet music show building", () => {
             expect("lyricSize" in (item.sheet_music || {})).toBe(false)
         }
     })
+
+    it("writes the chosen words size on every notation item in 'all' mode", () => {
+        const baseOptions = {
+            name: "Sample Hymn",
+            label: "Sample Hymn",
+            slides: [{ mei: slide1Mei }, { mei: wordlessMei }, { mei: slide2Mei }],
+            verseMode: "all" as const,
+            verseNumbers: [1, 2, 3],
+            parts: "all" as const,
+            textVerses: [["4. Plain text verse line"]],
+            createId: makeSequentialIdFactory()
+        }
+
+        const defaultShow = buildSheetMusicShow(baseOptions)
+        const largeShow = buildSheetMusicShow({ ...baseOptions, words: "large", createId: makeSequentialIdFactory() })
+        const normalShow = buildSheetMusicShow({ ...baseOptions, words: "normal", createId: makeSequentialIdFactory() })
+
+        const collectNotationItems = (slides: Record<string, { items: { type?: string; sheet_music?: { lyricSize?: number } }[] }>) => Object.values(slides).flatMap((slide) => slide.items.filter((item) => item.type === "sheet_music"))
+
+        const defaultItems = collectNotationItems(defaultShow.slides)
+        const largeItems = collectNotationItems(largeShow.slides)
+        const normalItems = collectNotationItems(normalShow.slides)
+
+        expect(defaultItems).toHaveLength(3)
+        expect(largeItems).toHaveLength(3)
+        expect(normalItems).toHaveLength(3)
+
+        for (const item of [...defaultItems, ...largeItems]) {
+            expect(item.sheet_music?.lyricSize).toBe(175)
+        }
+        for (const item of normalItems) {
+            expect(item.sheet_music?.lyricSize).toBeUndefined()
+            expect("lyricSize" in (item.sheet_music || {})).toBe(false)
+        }
+    })
 })

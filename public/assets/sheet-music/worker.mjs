@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -24,6 +24,35 @@ const MIN_LYRIC_SIZE = 100
 const MAX_LYRIC_SIZE = 175
 const VEROVIO_DEFAULT_LYRIC_SIZE = 4.5
 const VEROVIO_MAX_LYRIC_SIZE = 8.0
+const VEROVIO_DEFAULT_LYRIC_WORD_SPACE = 1.2
+const VEROVIO_MAX_LYRIC_WORD_SPACE = 1.6
+// Small margins give large words more of the box. A brace or bracket hangs left of the staves and needs the full
+// left margin, and a last syllable can hang past the last note, so the right margin stays a little wider.
+const LARGE_LYRIC_PAGE_MARGIN = 10
+const LARGE_LYRIC_RIGHT_MARGIN = 30
+const GROUP_SYMBOL_LEFT_MARGIN = 50
+const LARGE_LYRIC_SPACING_STAFF = 4
+const LARGE_LYRIC_SPACING_BRACE_GROUP = 4
+
+export function getLyricRenderOptions(lyricSize, hasGroupSymbol = false) {
+    const lyricSizePercent = typeof lyricSize === "number" && Number.isFinite(lyricSize) ? Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, lyricSize)) : DEFAULT_LYRIC_SIZE
+    if (lyricSizePercent <= DEFAULT_LYRIC_SIZE) return {}
+    return {
+        lyricSize: Math.min(VEROVIO_MAX_LYRIC_SIZE, (VEROVIO_DEFAULT_LYRIC_SIZE * lyricSizePercent) / 100),
+        lyricWordSpace: calculateLyricWordSpace(lyricSizePercent, VEROVIO_DEFAULT_LYRIC_WORD_SPACE, VEROVIO_MAX_LYRIC_WORD_SPACE),
+        pageMarginTop: LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginBottom: LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginLeft: hasGroupSymbol ? GROUP_SYMBOL_LEFT_MARGIN : LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginRight: LARGE_LYRIC_RIGHT_MARGIN,
+        spacingStaff: LARGE_LYRIC_SPACING_STAFF,
+        spacingBraceGroup: LARGE_LYRIC_SPACING_BRACE_GROUP
+    }
+}
+
+// True when the music draws a brace or bracket in front of its staves.
+function hasGroupSymbol(mei) {
+    return /<grpSym\b/.test(mei) || /<staffGrp\b[^>]*\bsymbol="(?!none")/.test(mei)
+}
 
 function countSvgSystems(svg) {
     const matches = svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g)
@@ -184,7 +213,7 @@ export async function handleMessage(message) {
         const drawMeasureNumbers = Boolean(showMeasureNumbers)
         const transposeSemitones = typeof transpose === "number" && Number.isInteger(transpose) && transpose >= -11 && transpose <= 11 && transpose !== 0 ? transpose : 0
         const lyricSizePercent = typeof lyricSize === "number" && Number.isFinite(lyricSize) ? Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, lyricSize)) : DEFAULT_LYRIC_SIZE
-        const verovioLyricSize = lyricSizePercent > DEFAULT_LYRIC_SIZE ? Math.min(VEROVIO_MAX_LYRIC_SIZE, (VEROVIO_DEFAULT_LYRIC_SIZE * lyricSizePercent) / 100) : null
+        const lyricOptions = getLyricRenderOptions(lyricSizePercent, hasGroupSymbol(mei))
 
         const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
         const transposeInterval = transposeSemitones !== 0 ? chooseTransposeInterval(renderMei, transposeSemitones) : ""
@@ -196,10 +225,9 @@ export async function handleMessage(message) {
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                const renderOptions = { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width }
                 if (drawMeasureNumbers) renderOptions.mnumInterval = 1
                 if (transposeInterval) renderOptions.transpose = transposeInterval
-                if (verovioLyricSize !== null) renderOptions.lyricSize = verovioLyricSize
                 tk.setOptions(renderOptions)
                 tk.getLog()
                 const loaded = tk.loadData(renderMei)
