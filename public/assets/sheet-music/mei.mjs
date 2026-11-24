@@ -282,6 +282,121 @@ export function hideMeasureNumbers(mei) {
     return mei.replace(/<scoreDef\b([^>]*?)(\/?)>/g, (_tag, attrs, slash) => `<scoreDef${setTagAttr(attrs, "mnum.visible", "false")}${slash}>`).replace(/<mNum(?:\s[^>]*)?\/>|<mNum(?:\s[^>]*)?>[\s\S]*?<\/mNum>/g, "")
 }
 
+const TRANSPOSE_INTERVALS = {
+    1: [
+        { name: "m2", fifths: -5 },
+        { name: "A1", fifths: 7 }
+    ],
+    2: [
+        { name: "M2", fifths: 2 },
+        { name: "d3", fifths: -10 }
+    ],
+    3: [
+        { name: "m3", fifths: -3 },
+        { name: "A2", fifths: 9 }
+    ],
+    4: [
+        { name: "M3", fifths: 4 },
+        { name: "d4", fifths: -8 }
+    ],
+    5: [
+        { name: "P4", fifths: -1 },
+        { name: "A3", fifths: 11 }
+    ],
+    6: [
+        { name: "A4", fifths: 6 },
+        { name: "d5", fifths: -6 }
+    ],
+    7: [
+        { name: "P5", fifths: 1 },
+        { name: "d6", fifths: -11 }
+    ],
+    8: [
+        { name: "m6", fifths: -4 },
+        { name: "A5", fifths: 8 }
+    ],
+    9: [
+        { name: "M6", fifths: 3 },
+        { name: "d7", fifths: -9 }
+    ],
+    10: [
+        { name: "m7", fifths: -2 },
+        { name: "A6", fifths: 10 }
+    ],
+    11: [
+        { name: "M7", fifths: 5 },
+        { name: "d8", fifths: -7 }
+    ]
+}
+
+export function parseKeySigFifths(value) {
+    if (typeof value !== "string") return null
+    const trimmed = value.trim()
+    if (trimmed === "0") return 0
+    const match = /^(\d+)([sf])$/i.exec(trimmed)
+    if (!match) return null
+    const count = Number(match[1])
+    if (!Number.isFinite(count)) return null
+    if (count === 0) return 0
+    return match[2].toLowerCase() === "s" ? count : -count
+}
+
+export function extractKeySignatures(mei) {
+    if (typeof mei !== "string") return []
+    const keys = []
+    const tagRe = /<(scoreDef|staffDef|keySig)\b([^>]*?)\/?>/g
+    let match
+    while ((match = tagRe.exec(mei)) !== null) {
+        const [, tagName, attrs] = match
+        const raw = tagName === "keySig" ? readTagAttr(attrs, "sig") : (readTagAttr(attrs, "keysig") ?? readTagAttr(attrs, "key.sig"))
+        const fifths = parseKeySigFifths(raw)
+        if (fifths !== null) keys.push(fifths)
+    }
+    return keys
+}
+
+export function chooseTransposeInterval(mei, semitones) {
+    if (typeof semitones !== "number" || !Number.isInteger(semitones) || semitones < -11 || semitones > 11 || semitones === 0) return ""
+
+    const pair = TRANSPOSE_INTERVALS[Math.abs(semitones)]
+    if (!pair) return ""
+
+    const sign = semitones > 0 ? 1 : -1
+    const candidates = pair.map(({ name, fifths }) => ({
+        name: sign > 0 ? name : `-${name}`,
+        fifths: fifths * sign
+    }))
+
+    const parsedKeys = extractKeySignatures(mei)
+    const keys = parsedKeys.length ? parsedKeys : [0]
+
+    const score = (candidate) => {
+        let maxAccids = 0
+        for (const key of keys) {
+            const accids = Math.abs(key + candidate.fifths)
+            if (accids > maxAccids) maxAccids = accids
+        }
+        return { maxAccids, firstAccids: Math.abs(keys[0] + candidate.fifths) }
+    }
+
+    const first = candidates[0]
+    const second = candidates[1]
+    const firstScore = score(first)
+    const secondScore = score(second)
+
+    if (firstScore.maxAccids !== secondScore.maxAccids) {
+        return firstScore.maxAccids < secondScore.maxAccids ? first.name : second.name
+    }
+    if (firstScore.firstAccids !== secondScore.firstAccids) {
+        return firstScore.firstAccids < secondScore.firstAccids ? first.name : second.name
+    }
+    // For ±6 both spellings have |fifths| === 6; prefer the flatward spelling so +6 and -6 give the same key signature
+    if (Math.abs(first.fifths) === Math.abs(second.fifths)) {
+        return first.fifths < second.fifths ? first.name : second.name
+    }
+    return first.name
+}
+
 function hasUnsafeCssReference(raw) {
     const decoded = decodeXmlEntities(raw)
     if (decoded.includes("\\")) return true

@@ -27,7 +27,7 @@
 
     export let sections: { [key: string]: EditBoxSection } = {}
     export let styles: { [key: string]: string } = {}
-    export let customValues: { [key: string]: string } = {}
+    export let customValues: { [key: string]: string | number } = {}
     export let customLocalFonts: CustomFont[] = []
     export let item: any = {}
     export let isStage = false

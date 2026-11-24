@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, countMeasures, extractHeaderMetadata, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -235,5 +235,36 @@ describe("mei pure helpers", () => {
         )
         expect(tooTall.fits).toBe(false)
         expect(tooTall.pageWidth).toBe(4000)
+    })
+
+    it("extracts key signatures from scoreDef, staffDef and keySig elements", () => {
+        expect(parseKeySigFifths("0")).toBe(0)
+        expect(parseKeySigFifths("2s")).toBe(2)
+        expect(parseKeySigFifths("3f")).toBe(-3)
+        expect(parseKeySigFifths("mixed")).toBeNull()
+
+        const mei = '<mei><scoreDef keysig="1s"><staffGrp><staffDef n="1" key.sig="2f"><keySig sig="3f"/></staffDef></staffGrp></scoreDef><section><scoreDef key.sig="0"/></section></mei>'
+        expect(extractKeySignatures(mei)).toEqual([1, -2, -3, 0])
+    })
+
+    it("picks transpose intervals that minimize max accidentals across key changes and stay consistent at +/-6", () => {
+        const gToEb = '<mei><scoreDef keysig="1s"/><section><measure n="1"/><scoreDef keysig="3f"/><measure n="2"/></section></mei>'
+        // -m2 (+5 fifths) turns G (1s) -> F# (6s) and Eb (3f) -> D (2s), max 6, vs -A1 (-7) giving 6f and 10f
+        expect(chooseTransposeInterval(gToEb, -1)).toBe("-m2")
+        // +1: m2 (-5) gives Ab (4f) -> Fb (8f), A1 (+7) gives G# (8s) -> E (4s); both max 8, first key 4 < 8 picks m2
+        expect(chooseTransposeInterval(gToEb, 1)).toBe("m2")
+
+        // Eb (3f) up 3: m3 (-3 -> 6f Gb) vs A2 (+9 -> 6s F#); tie on max and first key picks first column m3
+        const eb = '<mei><scoreDef keysig="3f"/></mei>'
+        expect(chooseTransposeInterval(eb, 3)).toBe("m3")
+        expect(chooseTransposeInterval(eb, -9)).toBe("-M6")
+
+        // C (0) at +6 and -6 both choose the flatward 6-accidental spelling (d5 and -A4)
+        const cMajor = '<mei><scoreDef keysig="0"/></mei>'
+        expect(chooseTransposeInterval(cMajor, 6)).toBe("d5")
+        expect(chooseTransposeInterval(cMajor, -6)).toBe("-A4")
+        expect(chooseTransposeInterval("<mei><section/></mei>", 2)).toBe("M2")
+        expect(chooseTransposeInterval(cMajor, 0)).toBe("")
+        expect(chooseTransposeInterval(cMajor, 12)).toBe("")
     })
 })

@@ -9,7 +9,7 @@ import { _show } from "../../helpers/shows"
 import { getStyles } from "../../helpers/style"
 import { itemBoxes } from "../values/boxes"
 import { itemSections } from "../values/item"
-import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, withExtraStyleLeaves } from "./styleValues"
+import { EXTRA_STYLE_LEAVES, copyStyleValues, getStyleLeafRoots, getStylePastePlan, omitExcludedStyleLeaves, withExtraStyleLeaves } from "./styleValues"
 import type { StyleInput } from "./styleValues"
 
 type StyleClipboard = {
@@ -129,8 +129,9 @@ export async function setBoxStyle(styles: StyleClipboard[], slides: any, type: I
 
         // item keys
         Object.keys(style.keys).forEach((key) => {
-            const value = style.keys[key]
             const mergeLeaves = leafRoots.has(key)
+            const value = mergeLeaves ? omitExcludedStyleLeaves(key, style.keys[key]) : style.keys[key]
+            if (mergeLeaves && typeof value === "object" && value !== null && !Array.isArray(value) && !Object.keys(value).length) return
             const targets = items.map((index) => ({ index, value: slide.items[index]?.[key] }))
             const paste = getStylePastePlan(targets, value, mergeLeaves)
             if (paste) {

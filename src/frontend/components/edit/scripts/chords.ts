@@ -1,8 +1,12 @@
+import { get } from "svelte/store"
 import { uid } from "uid"
 import type { Chords, Item, Show, Slide } from "../../../../types/Show"
-import { selected } from "../../../stores"
+import { activeFocus, activeShow, focusMode, selected, showsCache } from "../../../stores"
+import { transposeText } from "../../../utils/chordTranspose"
 import { clone } from "../../helpers/array"
+import { history } from "../../helpers/history"
 import { _show } from "../../helpers/shows"
+import { stepSheetMusicTranspose } from "../../slide/views/sheetMusic/helpers"
 import { keys } from "../values/chords"
 
 export function createChord(pos: number, key: string, id: string = uid(5)): Chords {
@@ -64,6 +68,64 @@ export function getShowChords(show: Show | null | undefined) {
     const chords = Object.values(show.slides).flatMap(getSlideChords)
     if (!chords.length) return []
     return [...new Set(chords)].sort((a, b) => a?.localeCompare(b))
+}
+
+export function transposeSlides(slides: { [key: string]: Slide }, step: number): { slides: { [key: string]: Slide }; changed: boolean } {
+    const nextSlides: { [key: string]: Slide } = clone(slides || {})
+    if (!step) return { slides: nextSlides, changed: false }
+
+    let changed = false
+
+    for (const slide of Object.values(nextSlides)) {
+        if (!slide?.items?.length) continue
+        for (const item of slide.items) {
+            if (!item) continue
+            if (item.type === "sheet_music") {
+                const nextTranspose = stepSheetMusicTranspose(item.sheet_music?.transpose, step)
+                if (nextTranspose !== item.sheet_music?.transpose) {
+                    if (!item.sheet_music) item.sheet_music = {}
+                    item.sheet_music.transpose = nextTranspose
+                    changed = true
+                }
+                continue
+            }
+
+            if (!item.lines?.length) continue
+            for (const line of item.lines) {
+                if (!line?.chords?.length) continue
+                for (const chord of line.chords) {
+                    if (!chord?.key) continue
+                    const nextKey = transposeText("[" + chord.key + "]", step).slice(1, -1)
+                    if (nextKey !== chord.key) {
+                        chord.key = nextKey
+                        changed = true
+                    }
+                }
+            }
+        }
+    }
+
+    return { slides: nextSlides, changed }
+}
+
+function resolveShowId(showId = ""): string {
+    if (showId && showId !== "active") return showId
+    if (get(focusMode) && get(showsCache)[get(activeFocus).id]) return get(activeFocus).id
+    return get(activeShow)?.id || ""
+}
+
+export function transposeShow(showId = "", step = 0): boolean {
+    const targetShowId = resolveShowId(showId)
+    if (!targetShowId || !step) return false
+
+    const show: Show | undefined = get(showsCache)[targetShowId]
+    if (!show?.slides || show.locked) return false
+
+    const { slides, changed } = transposeSlides(show.slides, step)
+    if (!changed) return false
+
+    history({ id: "UPDATE", newData: { key: "slides", data: slides }, oldData: { id: targetShowId }, location: { page: "show", id: "show_key" } })
+    return true
 }
 
 // IMPORT CHORD TEXT LINES

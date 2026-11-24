@@ -2,10 +2,10 @@
     import type { Show } from "../../../types/Show"
     import { getQuickExample } from "../../converters/txt"
     import { activePopup, textEditZoom } from "../../stores"
-    import { transposeText } from "../../utils/chordTranspose"
     import { newToast } from "../../utils/common"
     import { translateText } from "../../utils/language"
     import { getNormalizedKey } from "../../utils/shortcuts"
+    import { getShowChords, transposeShow } from "../edit/scripts/chords"
     import Icon from "../helpers/Icon.svelte"
     import FloatingInputs from "../input/FloatingInputs.svelte"
     import MaterialButton from "../inputs/MaterialButton.svelte"
@@ -13,6 +13,7 @@
     import { formatText } from "./formatTextEditor"
     import { getPlainEditorText } from "./getTextEditor"
     import HighlightedNotes from "./tools/HighlightedNotes.svelte"
+    import { showHasSheetMusic as hasShowSheetMusic } from "../slide/views/sheetMusic/helpers"
 
     export let currentShow: Show | undefined
 
@@ -49,27 +50,32 @@
         if (ctrlKey === "f") activePopup.set("find_replace")
     }
 
-    // transpose chords
+    // transpose chords and sheet music
     function transposeUp() {
-        formatText(transposeText(text, 1))
+        transposeShow("", 1)
     }
     function transposeDown() {
-        formatText(transposeText(text, -1))
+        transposeShow("", -1)
     }
 
-    $: showHasChords = Object.values(currentShow?.slides || {}).some((a) => a?.items?.some((a) => a.lines?.some((a) => a.chords)))
+    $: showHasChords = getShowChords(currentShow).length > 0
+    $: showHasSheetMusic = hasShowSheetMusic(currentShow)
+    $: canTranspose = showHasChords || showHasSheetMusic
 </script>
 
 <HighlightedNotes class="context #editbox_text" disabled={isLocked} style="padding: 30px;padding-bottom: 60px;scroll-padding-bottom: 60px;font-size: {$textEditZoom / 8}em;" placeholder={getQuickExample()} value={text} on:change={(e) => formatText(e.detail, "", itemIndex)} on:keydown={keydown} />
 
 <FloatingInputs side="left">
-    {#if showHasChords && itemIndex === 0}
+    {#if canTranspose && itemIndex === 0}
         <MaterialButton on:click={transposeUp} title="edit.transpose_up">
             <Icon id="arrow_up" size={1.3} white />
         </MaterialButton>
         <MaterialButton on:click={transposeDown} title="edit.transpose_down">
             <Icon id="arrow_down" size={1.3} white />
         </MaterialButton>
+        {#if !showHasChords}
+            <div class="divider"></div>
+        {/if}
     {/if}
 
     <MaterialZoom hidden={showHasChords && itemIndex === 0} columns={$textEditZoom / 10} min={0.5} max={2} defaultValue={1} addValue={-0.1} on:change={(e) => textEditZoom.set(e.detail * 10)} />
