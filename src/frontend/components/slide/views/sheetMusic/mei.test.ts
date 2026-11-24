@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
     applyInitialMeter,
+    calculateLyricWordSpace,
+    getRowWidths,
     chooseRowStarts,
     chooseTransposeInterval,
     countMeasures,
@@ -21,7 +23,6 @@ import {
     readSvgMeasureWidths,
     readSvgRowStarts,
     sanitizeSvg,
-    scaleLyricOption,
     svgFitsWidth
 } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
@@ -301,23 +302,18 @@ describe("mei pure helpers", () => {
         expect(chooseTransposeInterval(cMajor, 12)).toBe("")
     })
 
-    it("scales lyric spacing options linearly from 100 to 150 and clamps outside the range", () => {
-        expect(scaleLyricOption(100, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(125, 1.2, 3.2)).toBe(2.2)
-        expect(scaleLyricOption(150, 1.2, 3.2)).toBe(3.2)
-        expect(scaleLyricOption(175, 1.2, 3.2)).toBe(3.2)
-        expect(scaleLyricOption(99, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(50, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(0, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(-25, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(250, 1.2, 3.2)).toBe(3.2)
-        expect(scaleLyricOption(Number.NaN, 1.2, 3.2)).toBe(1.2)
-        expect(scaleLyricOption(undefined, 1.2, 3.2)).toBe(1.2)
-
-        expect(scaleLyricOption(100, 2, 6)).toBe(2)
-        expect(scaleLyricOption(125, 2, 6)).toBe(4)
-        expect(scaleLyricOption(150, 2, 6)).toBe(6)
-        expect(scaleLyricOption(175, 2, 6)).toBe(6)
+    it("calculates lyricWordSpace linearly from 1.2 at 100 to 3.2 at 150 and clamps outside the range", () => {
+        expect(calculateLyricWordSpace(100)).toBe(1.2)
+        expect(calculateLyricWordSpace(125)).toBe(2.2)
+        expect(calculateLyricWordSpace(150)).toBe(3.2)
+        expect(calculateLyricWordSpace(175)).toBe(3.2)
+        expect(calculateLyricWordSpace(99)).toBe(1.2)
+        expect(calculateLyricWordSpace(50)).toBe(1.2)
+        expect(calculateLyricWordSpace(0)).toBe(1.2)
+        expect(calculateLyricWordSpace(-25)).toBe(1.2)
+        expect(calculateLyricWordSpace(250)).toBe(3.2)
+        expect(calculateLyricWordSpace(Number.NaN)).toBe(1.2)
+        expect(calculateLyricWordSpace(undefined)).toBe(1.2)
     })
 
     it("chooses row starts that minimize the widest row, break ties by widest narrowest row, then earliest break", () => {
@@ -328,6 +324,10 @@ describe("mei pure helpers", () => {
         expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 2)).toEqual([3])
         expect(chooseRowStarts([100, 100, 100], [100, 100, 100], 2)).toEqual([2])
         expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 1)).toEqual([])
+
+        // the width of each row
+        expect(getRowWidths([677, 283, 507, 178, 421], plus([677, 283, 507, 178, 421], 130), [3])).toEqual([1090, 1236])
+        expect(getRowWidths([100, 100, 100], [150, 150, 150], [])).toEqual([350])
         expect(chooseRowStarts([100, 200, 300], [100, 200, 300], 5)).toEqual([2, 3])
         // Tie on widest row (120) breaks by maximizing the narrowest row (30 over 20)
         expect(chooseRowStarts([10, 10, 10, 30], [20, 80, 100, 120], 3)).toEqual([3, 4])

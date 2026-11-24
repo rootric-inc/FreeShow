@@ -519,7 +519,9 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(twoRowStats.systemCount).toBe(2)
         expect(readSvgRowStarts(twoRows.svg)).toEqual([3])
         expect(twoRowStats.maxX).toBeGreaterThan(twoRowStats.usableRight * 0.95)
-        expect(getLastRenderLayouts()).toBe(4)
+        // The search's drawing, the one with a short last row, two that measure the bars, two that measure the rows,
+        // and the even rows
+        expect(getLastRenderLayouts()).toBe(7)
 
         // Fitted one-row drawing fills full width in 1 layout
         const fittedOneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840, ratio: 0.4 })
@@ -536,7 +538,8 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(fittedMulti.fits).toBe(true)
         expect(fittedMultiStats.systemCount).toBeGreaterThan(1)
         expect(fittedMultiStats.maxX).toBeGreaterThan(fittedMultiStats.usableRight * 0.95)
-        expect(fittedMultiLayouts).toBeLessThanOrEqual(9)
+        // the search's drawings and the six of the even rows
+        expect(fittedMultiLayouts).toBeLessThanOrEqual(10)
 
         // Repeating the same fit request or a narrower preferred width reuses the finalized canonical drawing identically
         const repeatedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
@@ -774,13 +777,9 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
 
     it("tightens margins and sets lyric word space and staff spacing above 100, leaves 100 identical to omitted, logs nothing at 175, and clamps bad lyricSize values", async () => {
         expect(getLyricRenderOptions(100)).toEqual({})
-        expect(getLyricRenderOptions(100).lyricTopMinMargin).toBeUndefined()
-        expect(getLyricRenderOptions(125).lyricTopMinMargin).toBe(3.5)
-        expect(getLyricRenderOptions(150).lyricTopMinMargin).toBe(5)
         expect(getLyricRenderOptions(137.5)).toEqual({
             lyricSize: 6.1875,
             lyricWordSpace: 2.7,
-            lyricTopMinMargin: 4.25,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,
@@ -791,7 +790,6 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(getLyricRenderOptions(175)).toEqual({
             lyricSize: 7.875,
             lyricWordSpace: 3.2,
-            lyricTopMinMargin: 5,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,
@@ -836,6 +834,42 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(at50.svg).toBe(at100.svg)
         expect(asString.svg).toBe(at100.svg)
         expect(asNaN.svg).toBe(at100.svg)
+    })
+
+    it("keeps the rows of a drawing when even rows would make a row fuller or the last row is already full", async () => {
+        const bar = (n: number, notes: string) => `<measure n="${n}"><staff n="1"><layer n="1">${notes}</layer></staff></measure>`
+        const whole = (pname: string) => `<note dur="1" oct="4" pname="${pname}"><verse n="1"><syl>Holy</syl></verse></note>`
+        const halves = (first: string, second: string) => `<note dur="2" oct="4" pname="${first}"><verse n="1"><syl>Holy</syl></verse></note><note dur="2" oct="4" pname="${second}"><verse n="1"><syl>Holy</syl></verse></note>`
+        const piece = (bars: string) => `<mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section>${bars}</section></score></mdiv></body></music></mei>`
+
+        // Five equal bars, the last one in a key with seven sharps, drawn as three bars over two with a short last row.
+        // Two bars over three looks more even by the bars' own widths, but the second row would also carry the new key
+        // signature and be fuller than any row is now. The rows stay.
+        const keyChangeMei = piece(`${[1, 2, 3, 4].map((n) => bar(n, whole("e"))).join("")}<scoreDef keysig="7s" meter.count="4" meter.unit="4"/>${bar(5, whole("f"))}`)
+        const kept = await handleMessage({ type: "render", mei: keyChangeMei, pageWidth: 880 })
+        expect(getLastRenderLog()).toBe("")
+        expect(kept.fits).toBe(true)
+        expect(readSvgRowStarts(kept.svg)).toEqual([4])
+        // The search's drawing, the one with a short last row, two that measure the bars and two that measure the rows
+        expect(getLastRenderLayouts()).toBe(6)
+
+        // Without the key change the same bars are spread two over three
+        const spread = await handleMessage({ type: "render", mei: piece([1, 2, 3, 4, 5].map((n) => bar(n, whole("e"))).join("")), pageWidth: 880 })
+        expect(readSvgRowStarts(spread.svg)).toEqual([3])
+
+        // Eight equal bars that fill two rows are not measured, and the rows stay as they are
+        const equalBars = piece([1, 2, 3, 4, 5, 6, 7, 8].map((n) => bar(n, halves("e", "g"))).join(""))
+        let fullWidth = 0
+        for (const pageWidth of [1000, 1100, 1200, 1300, 1400, 1500, 1600]) {
+            const drawn = await handleMessage({ type: "render", mei: equalBars, pageWidth })
+            if (readSvgRowStarts(drawn.svg).join() === "5") {
+                fullWidth = pageWidth
+                // the search's drawing and the one that would leave a short last row
+                expect(getLastRenderLayouts()).toBe(2)
+                break
+            }
+        }
+        expect(fullWidth).toBeGreaterThan(0)
     })
 
     it("spreads multi-row drawings evenly, stays deterministic with empty log, ignores existing breaks, and skips measuring one-row drawings", async () => {

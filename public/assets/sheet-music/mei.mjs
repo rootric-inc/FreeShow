@@ -957,10 +957,22 @@ export function chooseRowStarts(plainWidths, startWidths, rowCount) {
     return starts
 }
 
-// Scales a lyric spacing option linearly from min at words size 100 to max at 150 and stays at max above.
-export function scaleLyricOption(lyricSize, min, max) {
-    if (typeof lyricSize !== "number" || !Number.isFinite(lyricSize) || lyricSize <= 100) return min
-    if (lyricSize >= 150) return max
+// The width of each row when the bars are cut into rows at rowStarts. plainWidths holds the width of every bar and
+// startWidths its width when it starts a row.
+export function getRowWidths(plainWidths, startWidths, rowStarts) {
+    const bounds = [1, ...rowStarts, plainWidths.length + 1]
+    return bounds.slice(0, -1).map((start, row) => {
+        let width = startWidths[start - 1]
+        for (let bar = start + 1; bar < bounds[row + 1]; bar++) width += plainWidths[bar - 1]
+        return width
+    })
+}
+
+// The least gap between two words for a words size in percent. Verovio lets large words touch unless the gap grows
+// much faster than the words, so it reaches its full value at 150 and stays there.
+export function calculateLyricWordSpace(lyricSize, minWordSpace = 1.2, maxWordSpace = 3.2) {
+    if (typeof lyricSize !== "number" || !Number.isFinite(lyricSize) || lyricSize <= 100) return minWordSpace
+    if (lyricSize >= 150) return maxWordSpace
     const ratio = (lyricSize - 100) / (150 - 100)
-    return Math.round((min + (max - min) * ratio) * 1e6) / 1e6
+    return Math.round((minWordSpace + (maxWordSpace - minWordSpace) * ratio) * 1e6) / 1e6
 }
