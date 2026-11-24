@@ -17,7 +17,7 @@
     import { addFilterString, addStyle, addStyleString, getItemStyleAtPos, getItemText, getLastLineAlign, getLineText, getSelectionRange } from "../scripts/textStyle"
     import { itemBoxes, setBoxInputValue } from "../values/boxes"
     import { VideoPlayer } from "../../media/video/videoPlayer"
-    import { escapeHtml, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicParts, getSheetMusicTranspose, mergeSheetMusicOwnedFields } from "../../slide/views/sheetMusic/helpers"
+    import { escapeHtml, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLyricSize, getSheetMusicParts, getSheetMusicTranspose, mergeSheetMusicOwnedFields } from "../../slide/views/sheetMusic/helpers"
     import { summarizeMei } from "../../slide/views/sheetMusic/meiParts"
     import type { MeiSummary } from "../../slide/views/sheetMusic/meiParts"
     import { getAllPartKeys, getDisplayedVersesValue, getPartNames, hasPartsOptions, resolveCustomPartsKeys, toggleCustomPartKey } from "../../slide/views/sheetMusic/parts"
@@ -258,12 +258,14 @@
         }
     }
     $: sheetMusicVersesDisplayValue = id === "sheet_music" && item ? getDisplayedVersesValue(item.sheet_music?.verses, sheetMusicSummary.verses) : null
+    $: sheetMusicLyricSizeDisplayValue = id === "sheet_music" && item ? getSheetMusicLyricSize(item.sheet_music) : null
     $: sheetMusicTransposeDisplayValue = id === "sheet_music" && item ? getSheetMusicTranspose(item.sheet_music) : null
 
     $: customValues = {
         "text-align": lineAlignStyle["text-align"] || "center",
         "align-items": alignStyle["align-items"] || "center",
         ...(sheetMusicVersesDisplayValue !== null ? { "sheet_music.verses": sheetMusicVersesDisplayValue } : {}),
+        ...(sheetMusicLyricSizeDisplayValue !== null ? { "sheet_music.lyricSize": sheetMusicLyricSizeDisplayValue } : {}),
         ...(sheetMusicTransposeDisplayValue !== null ? { "sheet_music.transpose": sheetMusicTransposeDisplayValue } : {})
     }
 
@@ -402,6 +404,7 @@
         const hasPartsChoice = hasPartsOptions(sheetMusicSummary)
         const hasVerses = sheetMusicSummary.verses.length > 0
 
+        setBoxInputValue(box, "default", "sheet_music.lyricSize", "hidden", !hasMusic || !hasVerses)
         setBoxInputValue(box, "default", "sheet_music.parts", "hidden", !hasMusic || !hasPartsChoice)
         setBoxInputValue(box, "default", "sheet_music.verses", "hidden", !hasMusic || !hasVerses)
         setBoxInputValue(box, "default", "sheet_music.transpose", "hidden", !hasMusic)

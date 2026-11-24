@@ -6,6 +6,9 @@ export const DEFAULT_ITEM_HEIGHT = 1080
 export const DEFAULT_NOTATION_SIZE = 100
 export const MIN_NOTATION_SIZE = 50
 export const MAX_NOTATION_SIZE = 200
+export const DEFAULT_LYRIC_SIZE = 100
+export const MIN_LYRIC_SIZE = 100
+export const MAX_LYRIC_SIZE = 175
 export const MIN_SHEET_MUSIC_TRANSPOSE = -11
 export const MAX_SHEET_MUSIC_TRANSPOSE = 11
 export const MIN_PAGE_WIDTH = 100
@@ -15,6 +18,11 @@ export const SVG_CACHE_MAX_BYTES = 20 * 1024 * 1024
 export function clampNotationSize(size: unknown): number {
     if (typeof size !== "number" || !Number.isFinite(size)) return DEFAULT_NOTATION_SIZE
     return Math.min(MAX_NOTATION_SIZE, Math.max(MIN_NOTATION_SIZE, size))
+}
+
+export function clampLyricSize(size: unknown): number {
+    if (typeof size !== "number" || !Number.isFinite(size)) return DEFAULT_LYRIC_SIZE
+    return Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, size))
 }
 
 export function getSheetMusicData(sheetMusic: unknown): string {
@@ -43,6 +51,11 @@ export function getSheetMusicSize(sheetMusic: unknown): number | undefined {
     if (!sheetMusic || typeof sheetMusic !== "object") return undefined
     const size = (sheetMusic as { size?: unknown }).size
     return typeof size === "number" && Number.isFinite(size) ? size : undefined
+}
+
+export function getSheetMusicLyricSize(sheetMusic: unknown): number {
+    if (!sheetMusic || typeof sheetMusic !== "object") return DEFAULT_LYRIC_SIZE
+    return clampLyricSize((sheetMusic as { lyricSize?: unknown }).lyricSize)
 }
 
 export function getSheetMusicParts(sheetMusic: unknown): SheetMusicPartsPreset | undefined {
@@ -170,12 +183,14 @@ export function getPageWidthFromStyle(style: string | null | undefined, size: un
     return calculatePageWidth(parseItemWidth(style), size)
 }
 
-export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false, transpose = 0): string {
+export function createRenderCacheKey(mei: string, pageWidth: number, ratio?: number, showMeasureNumbers = false, transpose = 0, lyricSize = DEFAULT_LYRIC_SIZE): string {
     const ratioPart = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? String(ratio) : ""
     const measureNumbersPart = showMeasureNumbers ? "mnum" : ""
     const normalizedTranspose = normalizeSheetMusicTranspose(transpose)
     const transposePart = normalizedTranspose !== 0 ? `t${normalizedTranspose}` : ""
-    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${transposePart}:${mei}`
+    const normalizedLyricSize = clampLyricSize(lyricSize)
+    const lyricSizePart = normalizedLyricSize !== DEFAULT_LYRIC_SIZE ? `l${normalizedLyricSize}` : ""
+    return `${pageWidth}:${ratioPart}:${measureNumbersPart}:${transposePart}:${lyricSizePart}:${mei}`
 }
 
 export function prefixSvgIds(svg: string, prefix: string): string {

@@ -675,4 +675,53 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
             expect(keyAccids.length).toBeLessThanOrEqual(6)
         }
     })
+
+    it("draws larger words with lyricSize, keeps 100 identical to omitted, resets after 175, and fits a box", async () => {
+        const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
+
+        const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
+
+        const getSyllableFontSizes = (svg: string): number[] => {
+            const sizes: number[] = []
+            const sylBlocks = svg.match(/<g[^>]*class="[^"]*\bsyl\b[^"]*"[^>]*>[\s\S]*?<\/g>/g) || []
+            for (const block of sylBlocks) {
+                const match = block.match(/<tspan[^>]*font-size="([\d.]+)(?:px)?"/)
+                if (match) sizes.push(Number(match[1]))
+            }
+            return sizes
+        }
+
+        const countSystems = (svg: string): number => (svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g) || []).length
+
+        const omittedBefore = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+        const at100 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 100 })
+        const at175 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 175 })
+        const omittedAfter = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(at100.svg).toBe(omittedBefore.svg)
+        expect(omittedAfter.svg).toBe(omittedBefore.svg)
+
+        const sizesAt100 = getSyllableFontSizes(at100.svg)
+        const sizesAt175 = getSyllableFontSizes(at175.svg)
+        expect(sizesAt100.length).toBeGreaterThan(0)
+        expect(sizesAt175.length).toBe(sizesAt100.length)
+        expect(sizesAt175[0]).toBeGreaterThan(sizesAt100[0])
+
+        // Fitted render in the import slide box (1820x800, max size 200 -> pageWidth 1090, ratio 0.44)
+        const boxWidth = calculatePageWidth(1820, 200)
+        const boxRatio = getItemRatioFromStyle("width: 1820px; height: 800px;")
+        const fitted100 = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 100 })
+        const fitted175 = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 175 })
+
+        expect(fitted175.fits).toBe(true)
+        expect(fitted175.pages).toBe(1)
+        expect(svgFitsWidth(fitted175.svg)).toBe(true)
+        const vb175 = parseSvgViewBox(fitted175.svg)
+        expect(vb175).not.toBeNull()
+        expect(vb175!.height / vb175!.width).toBeLessThanOrEqual(boxRatio)
+        expect(fitted175.svg).not.toBe(fitted100.svg)
+        expect(getSyllableFontSizes(fitted175.svg)[0]).toBeGreaterThan(getSyllableFontSizes(fitted100.svg)[0])
+        expect(countSystems(fitted175.svg)).toBeGreaterThanOrEqual(countSystems(fitted100.svg))
+    })
 })

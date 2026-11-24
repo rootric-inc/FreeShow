@@ -2,8 +2,8 @@ import abcjs from "abcjs"
 import { describe, expect, it } from "vitest"
 import { getStyles } from "../components/helpers/style"
 import { convertAndCheckAbc } from "../components/slide/views/sheetMusic/abcToMei"
-import { MAX_NOTATION_SIZE } from "../components/slide/views/sheetMusic/helpers"
-import { EMPTY_LYRICS_PLACEHOLDER, LYRICS_ONLY_ITEM_STYLE, SHEET_MUSIC_ITEM_STYLE, STAGE_TEXT_ITEM_STYLE, STAGE_TEXT_STYLE, buildSheetMusicShow, buildSheetMusicSlidesAndLayout, getFirstSlideVerses } from "./sheetMusic"
+import { MAX_LYRIC_SIZE, MAX_NOTATION_SIZE } from "../components/slide/views/sheetMusic/helpers"
+import { EMPTY_LYRICS_PLACEHOLDER, LYRICS_ONLY_ITEM_STYLE, SHEET_MUSIC_ITEM_STYLE, STAGE_TEXT_ITEM_STYLE, STAGE_TEXT_STYLE, buildSheetMusicShow, buildSheetMusicSlidesAndLayout, getFirstSlideVerses, getImportLyricSize } from "./sheetMusic"
 
 function makeSequentialIdFactory(): () => string {
     let counter = 0
@@ -48,6 +48,7 @@ describe("sheet music show building", () => {
             abc: "abc1",
             label: "Sample Hymn",
             size: MAX_NOTATION_SIZE,
+            lyricSize: MAX_LYRIC_SIZE,
             parts: "upper"
         })
 
@@ -210,5 +211,43 @@ describe("sheet music show building", () => {
         expect(allModeBuilt.slideCount).toBe(4)
         expect(allModeBuilt.slides[allModeBuilt.layoutSlides[1].id].items[0].lines?.map((line) => line.text[0].value)).toEqual(textVerses[0])
         expect(allModeBuilt.slides[allModeBuilt.layoutSlides[2].id].items[0].lines?.map((line) => line.text[0].value)).toEqual(textVerses[1])
+    })
+
+    it("writes lyricSize 175 on every notation item for Large (default) and omits it for Normal", () => {
+        expect(getImportLyricSize("large")).toBe(175)
+        expect(getImportLyricSize("normal")).toBeUndefined()
+
+        const baseOptions = {
+            name: "Sample Hymn",
+            label: "Sample Hymn",
+            slides: [{ mei: slide1Mei }, { mei: wordlessMei }, { mei: slide2Mei }],
+            verseMode: "per_verse" as const,
+            verseNumbers: [1, 2],
+            parts: "all" as const,
+            textVerses: [["3. Plain text verse line"]],
+            createId: makeSequentialIdFactory()
+        }
+
+        const defaultShow = buildSheetMusicShow(baseOptions)
+        const largeShow = buildSheetMusicShow({ ...baseOptions, words: "large", createId: makeSequentialIdFactory() })
+        const normalShow = buildSheetMusicShow({ ...baseOptions, words: "normal", createId: makeSequentialIdFactory() })
+
+        const collectNotationItems = (slides: Record<string, { items: { type?: string; sheet_music?: { lyricSize?: number } }[] }>) => Object.values(slides).flatMap((slide) => slide.items.filter((item) => item.type === "sheet_music"))
+
+        const defaultItems = collectNotationItems(defaultShow.slides)
+        const largeItems = collectNotationItems(largeShow.slides)
+        const normalItems = collectNotationItems(normalShow.slides)
+
+        expect(defaultItems).toHaveLength(6)
+        expect(largeItems).toHaveLength(6)
+        expect(normalItems).toHaveLength(6)
+
+        for (const item of [...defaultItems, ...largeItems]) {
+            expect(item.sheet_music?.lyricSize).toBe(175)
+        }
+        for (const item of normalItems) {
+            expect(item.sheet_music?.lyricSize).toBeUndefined()
+            expect("lyricSize" in (item.sheet_music || {})).toBe(false)
+        }
     })
 })

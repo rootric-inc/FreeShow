@@ -19,6 +19,11 @@ const RENDER_OPTIONS = {
 }
 
 const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
+const DEFAULT_LYRIC_SIZE = 100
+const MIN_LYRIC_SIZE = 100
+const MAX_LYRIC_SIZE = 175
+const VEROVIO_DEFAULT_LYRIC_SIZE = 4.5
+const VEROVIO_MAX_LYRIC_SIZE = 8.0
 
 function countSvgSystems(svg) {
     const matches = svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g)
@@ -170,7 +175,7 @@ export async function handleMessage(message) {
     }
 
     if (type === "render") {
-        const { mei, pageWidth, ratio, showMeasureNumbers, transpose } = message
+        const { mei, pageWidth, ratio, showMeasureNumbers, transpose, lyricSize } = message
         if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
@@ -178,6 +183,8 @@ export async function handleMessage(message) {
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
         const drawMeasureNumbers = Boolean(showMeasureNumbers)
         const transposeSemitones = typeof transpose === "number" && Number.isInteger(transpose) && transpose >= -11 && transpose <= 11 && transpose !== 0 ? transpose : 0
+        const lyricSizePercent = typeof lyricSize === "number" && Number.isFinite(lyricSize) ? Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, lyricSize)) : DEFAULT_LYRIC_SIZE
+        const verovioLyricSize = lyricSizePercent > DEFAULT_LYRIC_SIZE ? Math.min(VEROVIO_MAX_LYRIC_SIZE, (VEROVIO_DEFAULT_LYRIC_SIZE * lyricSizePercent) / 100) : null
 
         const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
         const transposeInterval = transposeSemitones !== 0 ? chooseTransposeInterval(renderMei, transposeSemitones) : ""
@@ -192,6 +199,7 @@ export async function handleMessage(message) {
                 const renderOptions = { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
                 if (drawMeasureNumbers) renderOptions.mnumInterval = 1
                 if (transposeInterval) renderOptions.transpose = transposeInterval
+                if (verovioLyricSize !== null) renderOptions.lyricSize = verovioLyricSize
                 tk.setOptions(renderOptions)
                 tk.getLog()
                 const loaded = tk.loadData(renderMei)
@@ -230,7 +238,7 @@ export async function handleMessage(message) {
                 }
             }
 
-            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${mei}`
+            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${lyricSizePercent > DEFAULT_LYRIC_SIZE ? lyricSizePercent : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
             const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical })
 

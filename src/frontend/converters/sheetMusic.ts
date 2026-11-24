@@ -1,10 +1,11 @@
 import { uid } from "uid"
 import type { Item, Line, Show, Slide, SlideData } from "../../types/Show"
-import { MAX_NOTATION_SIZE } from "../components/slide/views/sheetMusic/helpers"
+import { MAX_LYRIC_SIZE, MAX_NOTATION_SIZE } from "../components/slide/views/sheetMusic/helpers"
 import { extractSlideLyrics } from "../components/slide/views/sheetMusic/meiRead"
 
 export type SheetMusicImportParts = "all" | "upper" | "lower" | "melody"
 export type SheetMusicVerseMode = "per_verse" | "all"
+export type SheetMusicWordsSize = "large" | "normal"
 
 export interface SheetMusicMetadata {
     title?: string
@@ -25,6 +26,7 @@ export interface BuildSheetMusicSlidesOptions {
     verseMode: SheetMusicVerseMode
     verseNumbers: readonly number[]
     parts: SheetMusicImportParts
+    words?: SheetMusicWordsSize
     label: string
     textVerses?: readonly (readonly string[])[]
     createId?: () => string
@@ -46,6 +48,7 @@ export interface BuildSheetMusicShowOptions {
     verseMode: SheetMusicVerseMode
     verseNumbers: readonly number[]
     parts: SheetMusicImportParts
+    words?: SheetMusicWordsSize
     textVerses?: readonly (readonly string[])[]
     metadata?: SheetMusicMetadata
     created?: number
@@ -62,11 +65,16 @@ export function getFirstSlideVerses(verseMode: SheetMusicVerseMode, verseNumbers
     return verseMode === "per_verse" && verseNumbers.length > 1 ? String(verseNumbers[0]) : ""
 }
 
-function createSlideItems(slide: SheetMusicImportSlide, label: string, parts: SheetMusicImportParts, verseNumber?: number): Item[] {
+export function getImportLyricSize(words: SheetMusicWordsSize): number | undefined {
+    return words === "large" ? MAX_LYRIC_SIZE : undefined
+}
+
+function createSlideItems(slide: SheetMusicImportSlide, label: string, parts: SheetMusicImportParts, lyricSize?: number, verseNumber?: number): Item[] {
     const sheetMusic: NonNullable<Item["sheet_music"]> = {
         data: slide.mei,
         size: MAX_NOTATION_SIZE
     }
+    if (lyricSize !== undefined) sheetMusic.lyricSize = lyricSize
     if (slide.abc) sheetMusic.abc = slide.abc
     if (label) sheetMusic.label = label
     if (slide.measures) sheetMusic.measures = slide.measures
@@ -129,6 +137,7 @@ export function buildSheetMusicSlidesAndLayout(options: BuildSheetMusicSlidesOpt
 
     const usePerVerseGroups = options.verseMode === "per_verse" && options.verseNumbers.length > 1
     const groupVerses: (number | undefined)[] = usePerVerseGroups ? [...options.verseNumbers] : [undefined]
+    const lyricSize = getImportLyricSize(options.words ?? "large")
 
     let totalSlideCount = 0
     let totalGroupCount = 0
@@ -138,7 +147,7 @@ export function buildSheetMusicSlidesAndLayout(options: BuildSheetMusicSlidesOpt
         const childIds: string[] = []
 
         options.slides.forEach((slideSource, slideIndex) => {
-            const items = createSlideItems(slideSource, options.label, options.parts, verseNumber)
+            const items = createSlideItems(slideSource, options.label, options.parts, lyricSize, verseNumber)
             totalSlideCount++
 
             if (slideIndex === 0) {
@@ -198,6 +207,7 @@ export function buildSheetMusicShow(options: BuildSheetMusicShowOptions): Show {
         verseMode: options.verseMode,
         verseNumbers: options.verseNumbers,
         parts: options.parts,
+        words: options.words,
         label: options.label,
         textVerses: options.textVerses,
         createId

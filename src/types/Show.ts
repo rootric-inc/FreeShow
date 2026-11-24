@@ -148,6 +148,7 @@ export interface Item {
         abc?: string // the ABC text as typed or pasted, kept so the popup can edit it again. Missing on items made from a music file
         label?: string
         size?: number
+        lyricSize?: number // size of the words in percent of normal size, from 100 to 175. Missing means 100
         parts?: "all" | "upper" | "lower" | "melody" | "custom" // which voice parts are drawn. Missing means all
         customParts?: string[] // "staff.layer" keys such as "1.2", used only with "custom"
         verses?: string // which verses are drawn. Missing means all, "none" means no words, otherwise verse numbers separated by commas ("2" or "1,3")
