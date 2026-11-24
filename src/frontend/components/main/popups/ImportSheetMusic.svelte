@@ -7,8 +7,8 @@
     import { ToMain } from "../../../../types/IPC/ToMain"
     import type { TabsObj } from "../../../../types/Tabs"
     import { setTempShows } from "../../../converters/importHelpers"
-    import type { SheetMusicImportParts, SheetMusicImportSlide, SheetMusicMetadata, SheetMusicVerseMode } from "../../../converters/sheetMusic"
-    import { SHEET_MUSIC_ITEM_STYLE, buildSheetMusicShow, getFirstSlideVerses } from "../../../converters/sheetMusic"
+    import type { SheetMusicImportParts, SheetMusicImportSlide, SheetMusicMetadata, SheetMusicVerseMode, SheetMusicWordsSize } from "../../../converters/sheetMusic"
+    import { SHEET_MUSIC_ITEM_STYLE, buildSheetMusicShow, getFirstSlideVerses, getImportLyricSize } from "../../../converters/sheetMusic"
     import { destroyMain, receiveToMain, sendMain } from "../../../IPC/main"
     import { drawerTabsData } from "../../../stores"
     import { translateText } from "../../../utils/language"
@@ -60,6 +60,11 @@
         { value: "all", label: translateText("sheet_music.import_verses_all") }
     ]
 
+    const wordsOptions: DropdownOptions = [
+        { value: "large", label: translateText("sheet_music.import_words_large") },
+        { value: "normal", label: translateText("sheet_music.import_words_normal") }
+    ]
+
     let activeTab: ImportTab = "type"
     let text = ""
     let abcKey = "Eb"
@@ -87,6 +92,7 @@
     let selectedParts: SheetMusicImportParts = "all"
     let verseMode: SheetMusicVerseMode = "all"
     let verseModeTouched = false
+    let selectedWords: SheetMusicWordsSize = "large"
     let slideGrouping: SheetMusicSlideGrouping = "4"
 
     let firstSlidePreviewSvg = ""
@@ -122,7 +128,7 @@
 
     $: firstSlideVerses = getFirstSlideVerses(verseMode, activeVerses)
 
-    $: updateFirstSlidePreview(activeTab, hasValidAbc ? abcSlices[0]?.analysis.mei || "" : "", hasValidFile ? openedFileMei : "", hasValidFile ? fileRanges[0] || null : null, selectedParts, firstSlideVerses)
+    $: updateFirstSlidePreview(activeTab, hasValidAbc ? abcSlices[0]?.analysis.mei || "" : "", hasValidFile ? openedFileMei : "", hasValidFile ? fileRanges[0] || null : null, selectedParts, firstSlideVerses, selectedWords)
 
     function buildSlideOptions(includeBreaks: boolean): DropdownOptions {
         const options: DropdownOptions = []
@@ -294,7 +300,7 @@
         return filterMei(mei, { parts: resolvedParts.parts, verses: resolvedVerses, highestNoteOnly: resolvedParts.highestNoteOnly })
     }
 
-    async function updateFirstSlidePreview(tab: ImportTab, abcFirstMei: string, fileMei: string, firstRange: MeasureSliceRange | null, parts: SheetMusicImportParts, verses: string) {
+    async function updateFirstSlidePreview(tab: ImportTab, abcFirstMei: string, fileMei: string, firstRange: MeasureSliceRange | null, parts: SheetMusicImportParts, verses: string, words: SheetMusicWordsSize) {
         cancelFirstSlidePreview()
         const token = ++previewRequestToken
         firstSlidePreviewError = ""
@@ -327,7 +333,9 @@
             }
 
             const filteredMei = applyFiltersForPreview(rawFirstSlideMei, parts, verses)
-            const rendered = await renderMusic(filteredMei, FIRST_SLIDE_PAGE_WIDTH, FIRST_SLIDE_RATIO, controller.signal)
+            const previewLyricSize = getImportLyricSize(words)
+            const renderOptions = previewLyricSize !== undefined ? { lyricSize: previewLyricSize } : undefined
+            const rendered = await renderMusic(filteredMei, FIRST_SLIDE_PAGE_WIDTH, FIRST_SLIDE_RATIO, controller.signal, renderOptions)
             if (!isLive()) return
 
             firstSlidePreviewSvg = prefixSvgIds(rendered.svg, FIRST_SLIDE_SVG_PREFIX)
@@ -354,6 +362,7 @@
         const snapshotTab = activeTab
         const snapshotParts = selectedParts
         const snapshotVerseMode = verseMode
+        const snapshotWords = selectedWords
         const snapshotVerses = [...activeVerses]
         const snapshotTextVerses = snapshotTab === "type" ? abcTextVerses.map((verse) => [...verse]) : []
         const snapshotAbcSlices = abcSlices.map((slice) => ({ mei: slice.analysis.mei, abc: slice.abc }))
@@ -424,6 +433,7 @@
                 verseMode: snapshotVerseMode,
                 verseNumbers: snapshotVerses,
                 parts: snapshotParts,
+                words: snapshotWords,
                 textVerses: snapshotTextVerses,
                 metadata
             })
@@ -475,6 +485,7 @@
                     verseMode = e.detail
                 }}
             />
+            <MaterialDropdown label="sheet_music.import_words" value={selectedWords} options={wordsOptions} disabled={importing} on:change={(e) => (selectedWords = e.detail)} />
             {#if activeTab === "file"}
                 <MaterialDropdown label="sheet_music.import_slides" value={slideGrouping} options={slideOptions} disabled={importing} on:change={(e) => (slideGrouping = e.detail)} />
             {/if}

@@ -526,11 +526,12 @@ describe("setStyleLeaf", () => {
 })
 
 describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
-    it("copies size, parts, customParts and verses and never copies data, abc, label, measures or transpose", () => {
+    it("copies size, lyricSize, parts, customParts and verses and never copies data, abc, label, measures or transpose", () => {
         const boxesSource = readFileSync(fileURLToPath(new URL("../values/boxes.ts", import.meta.url)), "utf8")
         const sheetMusicBlock = boxesSource.slice(boxesSource.indexOf("sheet_music: {"))
         expect(sheetMusicBlock).toContain('type: "popup", id: "sheet_music"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.size"')
+        expect(sheetMusicBlock).toContain('id: "sheet_music.lyricSize"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.parts"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.verses"')
         expect(sheetMusicBlock).toContain('id: "sheet_music.transpose"')
@@ -539,6 +540,7 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             { id: "sheet_music", type: "popup" },
             { id: "style", type: "color" },
             { id: "sheet_music.size", type: "number" },
+            { id: "sheet_music.lyricSize", type: "number" },
             { id: "sheet_music.parts", type: "dropdown" },
             { id: "sheet_music.verses", type: "dropdown" },
             { id: "sheet_music.transpose", type: "number" }
@@ -554,6 +556,7 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
                 label: "Amazing Grace",
                 measures: "5-8",
                 size: 130,
+                lyricSize: 175,
                 parts: "custom" as const,
                 customParts: ["1.1", "2.1"],
                 verses: "2",
@@ -565,6 +568,7 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
         expect(copied).toEqual({
             sheet_music: {
                 size: 130,
+                lyricSize: 175,
                 parts: "custom",
                 customParts: ["1.1", "2.1"],
                 verses: "2"
@@ -582,6 +586,7 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             label: "Holy, Holy, Holy",
             measures: "1-4",
             size: 100,
+            lyricSize: 150,
             parts: "all",
             transpose: 2
         }
@@ -591,19 +596,21 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             label: "Holy, Holy, Holy",
             measures: "1-4",
             size: 130,
+            lyricSize: 175,
             parts: "custom",
             customParts: ["1.1", "2.1"],
             verses: "2",
             transpose: 2
         })
 
-        // Copying from an item without transpose leaves the target's transpose untouched
+        // Copying from an item without lyricSize or transpose clears lyricSize on the target while leaving transpose untouched
         const sourceWithoutTranspose = {
             type: "sheet_music" as const,
             sheet_music: { data: "<mei>plain</mei>", size: 100 }
         }
         const copiedPlain = copyStyleValues(sourceWithoutTranspose, inputs)
         expect("transpose" in copiedPlain.sheet_music).toBe(false)
+        expect(copiedPlain.sheet_music.lyricSize).toBeNull()
         const mergedPlain = mergeStyleValues(target, copiedPlain.sheet_music, true)
         expect(mergedPlain).toEqual({
             data: "<mei>target</mei>",
@@ -613,10 +620,12 @@ describe("sheet_music copy style (boxes.ts + EXTRA_STYLE_LEAVES)", () => {
             size: 100,
             transpose: 2
         })
+        expect("lyricSize" in mergedPlain).toBe(false)
 
-        // Even if a clipboard payload contains sheet_music.transpose, paste strips it
-        const sanitized = omitExcludedStyleLeaves("sheet_music", { size: 130, transpose: -3 })
-        expect(sanitized).toEqual({ size: 130 })
+        // Even if a clipboard payload contains sheet_music.transpose, paste strips it while keeping lyricSize
+        const sanitized = omitExcludedStyleLeaves("sheet_music", { size: 130, lyricSize: 160, transpose: -3 })
+        expect(sanitized).toEqual({ size: 130, lyricSize: 160 })
         expect(mergeStyleValues(target, sanitized, true).transpose).toBe(2)
+        expect(mergeStyleValues(target, sanitized, true).lyricSize).toBe(160)
     })
 })

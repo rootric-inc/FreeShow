@@ -458,7 +458,8 @@ export function parseSvgViewBox(svg) {
     return { width, height }
 }
 
-export function measureSvgWidth(svg) {
+// marginRight is the right page margin the drawing was made with, when it differs from the left one
+export function measureSvgWidth(svg, marginRight) {
     if (typeof svg !== "string") return { fits: true, neededWidth: null }
 
     const innerSvgMatch = svg.match(/<svg\b[^>]*\bclass=["'][^"']*\bdefinition-scale\b[^"']*["'][^>]*>/i)
@@ -485,7 +486,11 @@ export function measureSvgWidth(svg) {
     const marginX = Number(translateMatch[1])
     if (!Number.isFinite(marginX) || marginX < 0) return { fits: true, neededWidth: null }
 
-    const usableWidth = innerWidth - 2 * marginX
+    const outerBox = parseSvgViewBox(svg)
+    const unitScale = outerBox && outerBox.width > 0 ? innerWidth / outerBox.width : 10
+    const marginRightX = typeof marginRight === "number" && Number.isFinite(marginRight) && marginRight >= 0 ? marginRight * unitScale : marginX
+
+    const usableWidth = innerWidth - marginX - marginRightX
     const pageRight = innerWidth - marginX
     const body = svg.slice(marginTagMatch.index + marginTagMatch[0].length)
 
@@ -519,9 +524,7 @@ export function measureSvgWidth(svg) {
         if (x > maxContentX) maxContentX = x
     }
 
-    const outerBox = parseSvgViewBox(svg)
-    const unitScale = outerBox && outerBox.width > 0 ? innerWidth / outerBox.width : 10
-    const neededWidth = Number.isFinite(maxContentX) ? Math.ceil((maxContentX + 2 * marginX) / unitScale) : null
+    const neededWidth = Number.isFinite(maxContentX) ? Math.ceil((maxContentX + marginX + marginRightX) / unitScale) : null
 
     if (usableWidth <= 0) return { fits: false, neededWidth }
     if (Number.isFinite(maxStaffX) && maxStaffX > pageRight) return { fits: false, neededWidth }
@@ -532,16 +535,16 @@ export function measureSvgWidth(svg) {
     return { fits: true, neededWidth }
 }
 
-export function svgFitsWidth(svg) {
-    return measureSvgWidth(svg).fits
+export function svgFitsWidth(svg, marginRight) {
+    return measureSvgWidth(svg, marginRight).fits
 }
 
-function inspectLayout(rendered, pageWidth, targetRatio) {
+function inspectLayout(rendered, pageWidth, targetRatio, marginRight) {
     const pages = typeof rendered.pages === "number" && Number.isFinite(rendered.pages) ? rendered.pages : (rendered.pageCount ?? 1)
     const box = parseSvgViewBox(rendered.svg)
     const actualRatio = box ? box.height / box.width : null
     const effectiveRatio = actualRatio !== null ? actualRatio * Math.max(1, pages) : null
-    const widthCheck = measureSvgWidth(rendered.svg)
+    const widthCheck = measureSvgWidth(rendered.svg, marginRight)
     const fits = pages <= 1 && actualRatio !== null && actualRatio <= targetRatio && widthCheck.fits
     return {
         svg: rendered.svg,
@@ -556,7 +559,7 @@ function inspectLayout(rendered, pageWidth, targetRatio) {
 }
 
 function findCanonicalLayout(targetRatio, renderAt, options) {
-    const { maxWidth, maxLayouts, tolerance, startTime, maxTimeMs, now, seed } = options
+    const { maxWidth, maxLayouts, tolerance, startTime, maxTimeMs, now, seed, marginRight } = options
     const startWidth = Math.min(CANONICAL_START_WIDTH, maxWidth)
 
     let canonicalLayouts = 0
@@ -600,7 +603,7 @@ function findCanonicalLayout(targetRatio, renderAt, options) {
         }
 
         newLayouts++
-        return record(inspectLayout(renderAt(width), width, targetRatio))
+        return record(inspectLayout(renderAt(width), width, targetRatio, marginRight))
     }
 
     let current = tryWidth(startWidth)
@@ -713,12 +716,13 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
     const tolerance = options.tolerance ?? FIT_TOLERANCE
     const now = options.now ?? (() => Date.now())
     const cachedCanonical = options.canonical ?? null
+    const marginRight = options.marginRight
 
     const startTime = now()
     const initialWidth = Math.max(MIN_PAGE_WIDTH, Math.min(maxWidth, Math.round(preferredWidth)))
 
     let layouts = 1
-    const first = inspectLayout(renderAt(initialWidth), initialWidth, targetRatio)
+    const first = inspectLayout(renderAt(initialWidth), initialWidth, targetRatio, marginRight)
     if (first.fits) {
         return {
             svg: first.svg,
@@ -742,7 +746,8 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
             startTime,
             maxTimeMs,
             now,
-            seed: initialWidth === canonicalStart ? first : null
+            seed: initialWidth === canonicalStart ? first : null,
+            marginRight
         })
         layouts += canonical.newLayouts
         if (canonical.pageWidth > widest.pageWidth) {
@@ -772,7 +777,7 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
             if (nextWidth === currentWidth) break
             currentWidth = nextWidth
             layouts++
-            const attempt = inspectLayout(renderAt(currentWidth), currentWidth, targetRatio)
+            const attempt = inspectLayout(renderAt(currentWidth), currentWidth, targetRatio, marginRight)
             if (attempt.pageWidth > widest.pageWidth) widest = attempt
             if (attempt.fits) {
                 return {
@@ -805,4 +810,13 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
         layouts,
         canonical
     }
+}
+
+// The least gap between two words for a words size in percent. Verovio lets large words touch unless the gap grows
+// much faster than the words, so it reaches its full value at 150 and stays there.
+export function calculateLyricWordSpace(lyricSize, minWordSpace = 1.2, maxWordSpace = 3.2) {
+    if (typeof lyricSize !== "number" || !Number.isFinite(lyricSize) || lyricSize <= 100) return minWordSpace
+    if (lyricSize >= 150) return maxWordSpace
+    const ratio = (lyricSize - 100) / (150 - 100)
+    return Math.round((minWordSpace + (maxWordSpace - minWordSpace) * ratio) * 1e6) / 1e6
 }

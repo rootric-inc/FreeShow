@@ -3,6 +3,7 @@ import {
     DEFAULT_ITEM_HEIGHT,
     DEFAULT_ITEM_WIDTH,
     calculatePageWidth,
+    clampLyricSize,
     clampNotationSize,
     createRenderCacheKey,
     decodeBase64Text,
@@ -13,6 +14,7 @@ import {
     getSheetMusicData,
     getSheetMusicDisplayLabel,
     getSheetMusicLabel,
+    getSheetMusicLyricSize,
     getSheetMusicMeasures,
     getSheetMusicParts,
     getSheetMusicSize,
@@ -75,7 +77,7 @@ describe("sheetMusic page width and ratio math", () => {
 })
 
 describe("createRenderCacheKey", () => {
-    it("distinguishes different MEI documents, page widths, ratios, measure-number flags and transpose values", () => {
+    it("distinguishes different MEI documents, page widths, ratios, measure-number flags, transpose values and lyric sizes", () => {
         const keyA = createRenderCacheKey("<mei>A</mei>", 1840)
         const keyB = createRenderCacheKey("<mei>B</mei>", 1840)
         const keyC = createRenderCacheKey("<mei>A</mei>", 2300)
@@ -85,12 +87,18 @@ describe("createRenderCacheKey", () => {
         const keyRatioNumbers = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, true)
         const keyUp2 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 2)
         const keyDown3 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, -3)
+        const keyLyrics150 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0, 150)
+        const keyLyrics175 = createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0, 175)
 
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840))
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false))
         expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false, 0))
+        expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false, 0, 100))
+        expect(keyA).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, false, 0, 50))
         expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31))
         expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0))
+        expect(keyRatio1).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0, 100))
+        expect(keyLyrics175).toBe(createRenderCacheKey("<mei>A</mei>", 1840, 0.31, false, 0, 250))
         expect(keyNumbers).toBe(createRenderCacheKey("<mei>A</mei>", 1840, undefined, true))
         expect(keyA).not.toBe(keyB)
         expect(keyA).not.toBe(keyC)
@@ -101,6 +109,9 @@ describe("createRenderCacheKey", () => {
         expect(keyRatio1).not.toBe(keyUp2)
         expect(keyRatio1).not.toBe(keyDown3)
         expect(keyUp2).not.toBe(keyDown3)
+        expect(keyRatio1).not.toBe(keyLyrics150)
+        expect(keyRatio1).not.toBe(keyLyrics175)
+        expect(keyLyrics150).not.toBe(keyLyrics175)
     })
 })
 
@@ -203,6 +214,24 @@ describe("escapeHtml and safe sheet_music field readers", () => {
         expect(getSheetMusicSize({ size: "120" })).toBeUndefined()
         expect(getSheetMusicSize({ size: Number.NaN })).toBeUndefined()
         expect(getSheetMusicSize({ size: 125 })).toBe(125)
+        expect(clampLyricSize(undefined)).toBe(100)
+        expect(clampLyricSize("175")).toBe(100)
+        expect(clampLyricSize(Number.NaN)).toBe(100)
+        expect(clampLyricSize(Number.POSITIVE_INFINITY)).toBe(100)
+        expect(clampLyricSize(50)).toBe(100)
+        expect(clampLyricSize(100)).toBe(100)
+        expect(clampLyricSize(145)).toBe(145)
+        expect(clampLyricSize(175)).toBe(175)
+        expect(clampLyricSize(250)).toBe(175)
+        expect(getSheetMusicLyricSize(undefined)).toBe(100)
+        expect(getSheetMusicLyricSize(null)).toBe(100)
+        expect(getSheetMusicLyricSize({})).toBe(100)
+        expect(getSheetMusicLyricSize({ lyricSize: "175" })).toBe(100)
+        expect(getSheetMusicLyricSize({ lyricSize: Number.NaN })).toBe(100)
+        expect(getSheetMusicLyricSize({ lyricSize: 80 })).toBe(100)
+        expect(getSheetMusicLyricSize({ lyricSize: 150 })).toBe(150)
+        expect(getSheetMusicLyricSize({ lyricSize: 175 })).toBe(175)
+        expect(getSheetMusicLyricSize({ lyricSize: 300 })).toBe(175)
         expect(getSheetMusicParts({ parts: "upper" })).toBe("upper")
         expect(getSheetMusicParts({ parts: "invalid" })).toBeUndefined()
         expect(getSheetMusicParts({ parts: 42 })).toBeUndefined()

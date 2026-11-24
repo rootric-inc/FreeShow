@@ -10,6 +10,7 @@ interface PostedMessage {
     ratio?: number
     showMeasureNumbers?: boolean
     transpose?: number
+    lyricSize?: number
     text?: string
     first?: number
     last?: number
@@ -160,6 +161,38 @@ describe("sheetMusic engine client", () => {
         await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 15 })).resolves.toEqual({ svg: "<svg>orig</svg>", scale: 1, fits: true, pages: 1 })
         await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: 2 })).resolves.toEqual({ svg: "<svg>up2</svg>", scale: 1, fits: true, pages: 1 })
         await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { transpose: -3 })).resolves.toEqual({ svg: "<svg>down3</svg>", scale: 1, fits: true, pages: 1 })
+        expect(worker.posted).toHaveLength(3)
+    })
+
+    it("passes lyricSize to the worker and keeps different lyricSize values separate in flight and in cache", async () => {
+        const { renderMusic } = await import("./engine")
+
+        const pNormal = renderMusic("<mei>hymn</mei>", 1840, 0.31)
+        const pMid = renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 140 })
+        const pLarge = renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 175 })
+
+        const worker = FakeWorker.instances[0]
+        expect(worker.posted).toHaveLength(1)
+        expect(worker.posted[0].lyricSize).toBeUndefined()
+
+        worker.emitMessage({ id: worker.posted[0].id, ok: true, result: { svg: "<svg>normal</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pNormal).resolves.toEqual({ svg: "<svg>normal</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(2)
+        expect(worker.posted[1].lyricSize).toBe(140)
+        worker.emitMessage({ id: worker.posted[1].id, ok: true, result: { svg: "<svg>mid</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pMid).resolves.toEqual({ svg: "<svg>mid</svg>", scale: 1, fits: true, pages: 1 })
+
+        expect(worker.posted).toHaveLength(3)
+        expect(worker.posted[2].lyricSize).toBe(175)
+        worker.emitMessage({ id: worker.posted[2].id, ok: true, result: { svg: "<svg>large</svg>", pageWidth: 1840, scale: 1, fits: true, pages: 1 } })
+        await expect(pLarge).resolves.toEqual({ svg: "<svg>large</svg>", scale: 1, fits: true, pages: 1 })
+
+        // Subsequent calls hit their own cache entries; 100 and below-range share normal, above-range shares 175
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 100 })).resolves.toEqual({ svg: "<svg>normal</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 50 })).resolves.toEqual({ svg: "<svg>normal</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 140 })).resolves.toEqual({ svg: "<svg>mid</svg>", scale: 1, fits: true, pages: 1 })
+        await expect(renderMusic("<mei>hymn</mei>", 1840, 0.31, undefined, { lyricSize: 250 })).resolves.toEqual({ svg: "<svg>large</svg>", scale: 1, fits: true, pages: 1 })
         expect(worker.posted).toHaveLength(3)
     })
 

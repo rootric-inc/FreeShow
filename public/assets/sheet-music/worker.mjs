@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -19,6 +19,40 @@ const RENDER_OPTIONS = {
 }
 
 const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
+const DEFAULT_LYRIC_SIZE = 100
+const MIN_LYRIC_SIZE = 100
+const MAX_LYRIC_SIZE = 175
+const VEROVIO_DEFAULT_LYRIC_SIZE = 4.5
+const VEROVIO_MAX_LYRIC_SIZE = 8.0
+const VEROVIO_DEFAULT_LYRIC_WORD_SPACE = 1.2
+const VEROVIO_MAX_LYRIC_WORD_SPACE = 3.2
+// Small margins give large words more of the box. A brace or bracket hangs left of the staves and needs the full
+// left margin, and a last syllable can hang past the last note, so the right margin stays a little wider.
+const LARGE_LYRIC_PAGE_MARGIN = 10
+const LARGE_LYRIC_RIGHT_MARGIN = 30
+const GROUP_SYMBOL_LEFT_MARGIN = 50
+const LARGE_LYRIC_SPACING_STAFF = 4
+const LARGE_LYRIC_SPACING_BRACE_GROUP = 4
+
+export function getLyricRenderOptions(lyricSize, hasGroupSymbol = false) {
+    const lyricSizePercent = typeof lyricSize === "number" && Number.isFinite(lyricSize) ? Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, lyricSize)) : DEFAULT_LYRIC_SIZE
+    if (lyricSizePercent <= DEFAULT_LYRIC_SIZE) return {}
+    return {
+        lyricSize: Math.min(VEROVIO_MAX_LYRIC_SIZE, (VEROVIO_DEFAULT_LYRIC_SIZE * lyricSizePercent) / 100),
+        lyricWordSpace: calculateLyricWordSpace(lyricSizePercent, VEROVIO_DEFAULT_LYRIC_WORD_SPACE, VEROVIO_MAX_LYRIC_WORD_SPACE),
+        pageMarginTop: LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginBottom: LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginLeft: hasGroupSymbol ? GROUP_SYMBOL_LEFT_MARGIN : LARGE_LYRIC_PAGE_MARGIN,
+        pageMarginRight: LARGE_LYRIC_RIGHT_MARGIN,
+        spacingStaff: LARGE_LYRIC_SPACING_STAFF,
+        spacingBraceGroup: LARGE_LYRIC_SPACING_BRACE_GROUP
+    }
+}
+
+// True when the music draws a brace or bracket in front of its staves. A group with no symbol named draws none.
+function hasGroupSymbol(mei) {
+    return /<(?:grpSym|staffGrp)\b[^>]*\bsymbol="(?!none")/.test(mei)
+}
 
 function countSvgSystems(svg) {
     const matches = svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g)
@@ -170,7 +204,7 @@ export async function handleMessage(message) {
     }
 
     if (type === "render") {
-        const { mei, pageWidth, ratio, showMeasureNumbers, transpose } = message
+        const { mei, pageWidth, ratio, showMeasureNumbers, transpose, lyricSize } = message
         if (typeof mei !== "string" || !mei.trim()) throw createWorkerError("render_failed", "No music data to render")
 
         const parsedWidth = Math.round(Number(pageWidth) || DEFAULT_PAGE_WIDTH)
@@ -178,6 +212,8 @@ export async function handleMessage(message) {
         const targetRatio = typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0 ? ratio : null
         const drawMeasureNumbers = Boolean(showMeasureNumbers)
         const transposeSemitones = typeof transpose === "number" && Number.isInteger(transpose) && transpose >= -11 && transpose <= 11 && transpose !== 0 ? transpose : 0
+        const lyricSizePercent = typeof lyricSize === "number" && Number.isFinite(lyricSize) ? Math.min(MAX_LYRIC_SIZE, Math.max(MIN_LYRIC_SIZE, lyricSize)) : DEFAULT_LYRIC_SIZE
+        const lyricOptions = getLyricRenderOptions(lyricSizePercent, hasGroupSymbol(mei))
 
         const renderMei = drawMeasureNumbers ? mei : hideMeasureNumbers(mei)
         const transposeInterval = transposeSemitones !== 0 ? chooseTransposeInterval(renderMei, transposeSemitones) : ""
@@ -189,7 +225,7 @@ export async function handleMessage(message) {
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                const renderOptions = { ...RENDER_OPTIONS, minLastJustification, pageWidth: width }
+                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width }
                 if (drawMeasureNumbers) renderOptions.mnumInterval = 1
                 if (transposeInterval) renderOptions.transpose = transposeInterval
                 tk.setOptions(renderOptions)
@@ -225,14 +261,14 @@ export async function handleMessage(message) {
                     svg: cleanSvg,
                     pageWidth: clampedWidth,
                     scale: 1,
-                    fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg),
+                    fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg, lyricOptions.pageMarginRight),
                     pages: finalResult.pages
                 }
             }
 
-            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${mei}`
+            const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${lyricSizePercent > DEFAULT_LYRIC_SIZE ? lyricSizePercent : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
-            const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical })
+            const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical, marginRight: lyricOptions.pageMarginRight })
 
             const usedCachedCanonical = Boolean(cachedCanonical && fitted.svg === cachedCanonical.svg)
             const usedFreshCanonical = Boolean(!cachedCanonical && fitted.canonical && fitted.svg === fitted.canonical.svg)

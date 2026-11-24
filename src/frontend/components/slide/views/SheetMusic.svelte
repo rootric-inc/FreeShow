@@ -8,7 +8,8 @@
     import Icon from "../../helpers/Icon.svelte"
     import T from "../../helpers/T.svelte"
     import { SheetMusicError, renderMusic } from "./sheetMusic/engine"
-    import { createRenderCacheKey, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicParts, getSheetMusicSize, getSheetMusicTranspose, getSheetMusicVerses, prefixSvgIds } from "./sheetMusic/helpers"
+    import type { RenderMusicOptions } from "./sheetMusic/engine"
+    import { DEFAULT_LYRIC_SIZE, createRenderCacheKey, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicLyricSize, getSheetMusicParts, getSheetMusicSize, getSheetMusicTranspose, getSheetMusicVerses, prefixSvgIds } from "./sheetMusic/helpers"
     import type { SheetMusicPartsPreset } from "./sheetMusic/helpers"
     import { filterMei, summarizeMei } from "./sheetMusic/meiParts"
     import type { MeiSummary } from "./sheetMusic/meiParts"
@@ -91,14 +92,15 @@
     $: customPartsKey = customParts ? customParts.join(",") : ""
     $: versesRaw = getSheetMusicVerses(item?.sheet_music)
     $: transpose = getSheetMusicTranspose(item?.sheet_music)
+    $: lyricSize = getSheetMusicLyricSize(item?.sheet_music)
     $: displayMei = getFilteredMei(data, partsPreset, customParts, customPartsKey, versesRaw)
     $: pageWidth = getPageWidthFromStyle(item?.style, getSheetMusicSize(item?.sheet_music))
     $: ratio = getItemRatioFromStyle(item?.style)
-    $: scheduleRender(displayMei, pageWidth, ratio, transpose)
+    $: scheduleRender(displayMei, pageWidth, ratio, transpose, lyricSize)
 
-    function scheduleRender(mei: string, width: number, boxRatio: number, transposeSemitones: number) {
+    function scheduleRender(mei: string, width: number, boxRatio: number, transposeSemitones: number, wordsSize: number) {
         const musicChanged = mei !== lastData || transposeSemitones !== lastTranspose
-        const key = mei ? createRenderCacheKey(mei, width, boxRatio, false, transposeSemitones) : ""
+        const key = mei ? createRenderCacheKey(mei, width, boxRatio, false, transposeSemitones, wordsSize) : ""
 
         if (musicChanged) {
             lastData = mei
@@ -121,24 +123,26 @@
 
         const token = ++renderToken
         if (musicChanged || (!svg && !hasRendered && !renderError)) {
-            runRender(mei, width, boxRatio, transposeSemitones, token)
+            runRender(mei, width, boxRatio, transposeSemitones, wordsSize, token)
             return
         }
 
         debounceTimer = setTimeout(() => {
             debounceTimer = null
             if (destroyed || token !== renderToken) return
-            runRender(mei, width, boxRatio, transposeSemitones, token)
+            runRender(mei, width, boxRatio, transposeSemitones, wordsSize, token)
         }, RESIZE_DEBOUNCE_MS)
     }
 
-    async function runRender(mei: string, width: number, boxRatio: number, transposeSemitones: number, token: number) {
+    async function runRender(mei: string, width: number, boxRatio: number, transposeSemitones: number, wordsSize: number, token: number) {
         const controller = new AbortController()
         activeController = controller
 
         try {
-            const options = transposeSemitones !== 0 ? { transpose: transposeSemitones } : undefined
-            const result = await renderMusic(mei, width, boxRatio, controller.signal, options)
+            const options: RenderMusicOptions = {}
+            if (transposeSemitones !== 0) options.transpose = transposeSemitones
+            if (wordsSize !== DEFAULT_LYRIC_SIZE) options.lyricSize = wordsSize
+            const result = await renderMusic(mei, width, boxRatio, controller.signal, Object.keys(options).length ? options : undefined)
             if (destroyed || token !== renderToken) return
 
             svg = prefixSvgIds(result.svg, instancePrefix)

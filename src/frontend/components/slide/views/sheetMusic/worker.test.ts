@@ -100,12 +100,14 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
     let handleMessage: (message: Record<string, unknown>) => Promise<any>
     let getLastRenderLog: () => string
     let getLastRenderLayouts: () => number
+    let getLyricRenderOptions: (lyricSize: unknown, hasGroupSymbol?: boolean) => Record<string, number>
 
     beforeAll(async () => {
         const mod = await import(/* @vite-ignore */ workerModuleHref)
         handleMessage = mod.handleMessage
         getLastRenderLog = mod.getLastRenderLog
         getLastRenderLayouts = mod.getLastRenderLayouts
+        getLyricRenderOptions = mod.getLyricRenderOptions
     })
 
     it("loads MusicXML into normalized MEI without meiHead and with bar.thru set to false", async () => {
@@ -674,5 +676,159 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
             const keyAccids = getKeyAccidGlyphs(rendered.svg)
             expect(keyAccids.length).toBeLessThanOrEqual(6)
         }
+    })
+
+    it("draws larger words with lyricSize, keeps 100 identical to omitted, resets after 175, and fits a box", async () => {
+        // A brace or bracket hangs left of the staves, so music that draws one keeps the full left margin
+        expect(getLyricRenderOptions(175, true).pageMarginLeft).toBe(50)
+        expect(getLyricRenderOptions(175, false).pageMarginLeft).toBe(10)
+
+        const twoStaves = (groupStart: string) =>
+            `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4">${groupStart}<staffDef n="1" lines="5" clef.shape="G" clef.line="2" /><staffDef n="2" lines="5" clef.shape="F" clef.line="4" /></staffGrp></scoreDef><section><measure n="1"><staff n="1"><layer n="1"><note dur="1" pname="g" oct="4"><verse n="1"><syl>Praise</syl></verse></note></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="g" oct="3" /></layer></staff></measure></section></score></mdiv></body></music></mei>`
+        const getLeftMargin = async (groupStart: string) => {
+            const rendered = await handleMessage({ type: "render", mei: twoStaves(groupStart), pageWidth: 1840, lyricSize: 175 })
+            return Number(rendered.svg.match(/class="page-margin" transform="translate\((\d+)/)?.[1])
+        }
+        expect(await getLeftMargin('<staffGrp symbol="brace" bar.thru="false">')).toBe(500)
+        expect(await getLeftMargin('<staffGrp bar.thru="false"><grpSym symbol="brace" />')).toBe(500)
+        expect(await getLeftMargin('<staffGrp symbol="bracket" bar.thru="false">')).toBe(500)
+        expect(await getLeftMargin('<staffGrp symbol="none" bar.thru="false">')).toBe(100)
+        expect(await getLeftMargin('<staffGrp bar.thru="false"><grpSym />')).toBe(100)
+        expect(await getLeftMargin('<staffGrp bar.thru="false">')).toBe(100)
+
+        const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
+
+        const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
+
+        const getSyllableFontSizes = (svg: string): number[] => {
+            const sizes: number[] = []
+            const sylBlocks = svg.match(/<g[^>]*class="[^"]*\bsyl\b[^"]*"[^>]*>[\s\S]*?<\/g>/g) || []
+            for (const block of sylBlocks) {
+                const match = block.match(/<tspan[^>]*font-size="([\d.]+)(?:px)?"/)
+                if (match) sizes.push(Number(match[1]))
+            }
+            return sizes
+        }
+
+        const countSystems = (svg: string): number => (svg.match(/\bclass="[^"]*\bsystem\b[^"]*"/g) || []).length
+
+        const omittedBefore = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+        const at100 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 100 })
+        const at175 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 175 })
+        const omittedAfter = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+
+        expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
+        expect(at100.svg).toBe(omittedBefore.svg)
+        expect(omittedAfter.svg).toBe(omittedBefore.svg)
+
+        const sizesAt100 = getSyllableFontSizes(at100.svg)
+        const sizesAt175 = getSyllableFontSizes(at175.svg)
+        expect(sizesAt100.length).toBeGreaterThan(0)
+        expect(sizesAt175.length).toBe(sizesAt100.length)
+        expect(sizesAt175[0]).toBeGreaterThan(sizesAt100[0])
+
+        // Fitted render in the import slide box (1820x800, max size 200 -> pageWidth 1090, ratio 0.44)
+        const boxWidth = calculatePageWidth(1820, 200)
+        const boxRatio = getItemRatioFromStyle("width: 1820px; height: 800px;")
+        const fitted100 = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 100 })
+        const fitted175 = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize: 175 })
+
+        expect(fitted175.fits).toBe(true)
+        expect(fitted175.pages).toBe(1)
+        expect(svgFitsWidth(fitted175.svg)).toBe(true)
+        const vb175 = parseSvgViewBox(fitted175.svg)
+        expect(vb175).not.toBeNull()
+        expect(vb175!.height / vb175!.width).toBeLessThanOrEqual(boxRatio)
+        expect(fitted175.svg).not.toBe(fitted100.svg)
+        expect(getSyllableFontSizes(fitted175.svg)[0]).toBeGreaterThan(getSyllableFontSizes(fitted100.svg)[0])
+        expect(countSystems(fitted175.svg)).toBeGreaterThanOrEqual(countSystems(fitted100.svg))
+    })
+
+    it("keeps neighbouring words apart when the words are drawn larger", async () => {
+        // Each case is a melody line whose two words came out touching: the first word, its width in the
+        // drawing's font in units of the font size, and the word after it
+        const cases = [
+            { abc: ["E | F A B A | ^G F/E/ A d | c d B B | A3", "w: Hark! How the heav'n-ly an-them * drowns all mu-sic but its own."], word: "drowns", width: 2.94, next: "all" },
+            { abc: ["D | G G B B | A G A B | A G B A | G3", "w: All hail the pow'r of Je-sus' Name! Let an-gels pros-trate fall;"], word: "Name!", width: 2.71, next: "Let" }
+        ]
+        const boxWidth = calculatePageWidth(1820, 200)
+        const boxRatio = getItemRatioFromStyle("width: 1820px; height: 800px;")
+
+        const getSyllables = (svg: string) => [...svg.matchAll(/<g[^>]*class="[^"]*\bsyl\b[^"]*"[^>]*>\s*<text x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>[\s\S]*?<tspan font-size="([\d.]+)px">([^<]*)<\/tspan>/g)].map((match) => ({ x: Number(match[1]), y: Number(match[2]), size: Number(match[3]), text: match[4] }))
+
+        for (const { abc, word, width, next } of cases) {
+            const mei = convertAndCheckAbc(["T: Words", "M: 4/4", "L: 1/4", "K: D", ...abc].join("\n"), abcjs.parseOnly).mei
+            for (const lyricSize of [125, 150, 175]) {
+                const rendered = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize })
+                const syllables = getSyllables(rendered.svg)
+                const index = syllables.findIndex((syllable) => syllable.text === word)
+                expect(index).toBeGreaterThanOrEqual(0)
+                expect(syllables[index + 1].text).toBe(next)
+                // Both words are on one row, and the gap after the first is at least a fifth of the font size
+                expect(syllables[index + 1].y).toBe(syllables[index].y)
+                expect((syllables[index + 1].x - syllables[index].x) / syllables[index].size).toBeGreaterThanOrEqual(width + 0.2)
+            }
+        }
+    })
+
+    it("tightens margins and sets lyric word space and staff spacing above 100, leaves 100 identical to omitted, logs nothing at 175, and clamps bad lyricSize values", async () => {
+        expect(getLyricRenderOptions(100)).toEqual({})
+        expect(getLyricRenderOptions(137.5)).toEqual({
+            lyricSize: 6.1875,
+            lyricWordSpace: 2.7,
+            pageMarginTop: 10,
+            pageMarginBottom: 10,
+            pageMarginLeft: 10,
+            pageMarginRight: 30,
+            spacingStaff: 4,
+            spacingBraceGroup: 4
+        })
+        expect(getLyricRenderOptions(175)).toEqual({
+            lyricSize: 7.875,
+            lyricWordSpace: 3.2,
+            pageMarginTop: 10,
+            pageMarginBottom: 10,
+            pageMarginLeft: 10,
+            pageMarginRight: 30,
+            spacingStaff: 4,
+            spacingBraceGroup: 4
+        })
+
+        const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
+        const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
+
+        const getFirstStaffLineLeftShare = (svg: string): number => {
+            const innerSvgMatch = svg.match(/<svg\b[^>]*\bclass="[^"]*\bdefinition-scale\b[^"]*"[^>]*>/)
+            const vbMatch = innerSvgMatch?.[0].match(/\bviewBox="([^"]+)"/)
+            const marginTagMatch = svg.match(/<g\b[^>]*\bclass="[^"]*\bpage-margin\b[^"]*"[^>]*>/)
+            const translateMatch = marginTagMatch?.[0].match(/\btransform="[^"]*translate\(\s*(-?\d+(?:\.\d+)?)/)
+            const staffMatch = svg.match(/<g\b[^>]*\bclass="[^"]*\bstaff\b[^"]*"[^>]*>([\s\S]*?)<g\b/)
+            const lineMatch = staffMatch?.[1].match(/\bd="M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+L\s*(-?\d+(?:\.\d+)?)\s+\2"/)
+            expect(vbMatch).not.toBeNull()
+            expect(translateMatch).not.toBeNull()
+            expect(lineMatch).not.toBeNull()
+            const innerWidth = Number(vbMatch![1].trim().split(/[\s,]+/)[2])
+            const marginX = Number(translateMatch![1])
+            const staffLeftX = Math.min(Number(lineMatch![1]), Number(lineMatch![3]))
+            return (marginX + staffLeftX) / innerWidth
+        }
+
+        const omitted = await handleMessage({ type: "render", mei, pageWidth: 1840 })
+        const at100 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 100 })
+        const at175 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 175 })
+        expect(getLastRenderLog()).toBe("")
+
+        expect(at100.svg).toBe(omitted.svg)
+        expect(getFirstStaffLineLeftShare(at175.svg)).toBeLessThan(getFirstStaffLineLeftShare(at100.svg))
+
+        const at250 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 250 })
+        const at50 = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: 50 })
+        const asString = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: "175" })
+        const asNaN = await handleMessage({ type: "render", mei, pageWidth: 1840, lyricSize: Number.NaN })
+
+        expect(at250.svg).toBe(at175.svg)
+        expect(at50.svg).toBe(at100.svg)
+        expect(asString.svg).toBe(at100.svg)
+        expect(asNaN.svg).toBe(at100.svg)
     })
 })
