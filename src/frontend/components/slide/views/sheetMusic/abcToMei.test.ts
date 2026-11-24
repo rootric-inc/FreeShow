@@ -261,6 +261,25 @@ describe("convertAndCheckAbc", () => {
         expect(r4.mei.match(/<measure\b/g)).toHaveLength(2)
         expect(r4.mei).toContain('<measure n="1" right="rptend">')
         expect(r4.mei).toContain('<measure n="2" left="rptstart" right="end">')
+
+        // Bar line at the start of the next line closes an open bar and resets accidentals
+        const leadingBarNextLine = "M: 4/4\nL: 1/4\nK: C\nC D E ^F\n| F G A B |"
+        const r5 = convertAndCheckAbc(leadingBarNextLine, abcjs.parseOnly)
+        expectNoDuplicateAttributes(r5.mei)
+        expect(r5.problems).toEqual([])
+        expect(r5.mei.match(/<measure\b/g)).toHaveLength(2)
+        expect(r5.mei).not.toContain('right="invis"')
+        const r5Notes = r5.mei.match(/<note\b[^>]*>/g) || []
+        expect(r5Notes[3]).toContain('pname="f" oct="4" accid="s"')
+        expect(r5Notes[4]).toContain('pname="f" oct="4"')
+        expect(r5Notes[4]).not.toContain("accid")
+
+        // Bar line at the end of a line followed by a bar line at the start of the next line adds no empty bar
+        const barAcrossBreak = "M: 4/4\nL: 1/4\nK: C\nC D E F |\n| G A B c |]"
+        const r6 = convertAndCheckAbc(barAcrossBreak, abcjs.parseOnly)
+        expectNoDuplicateAttributes(r6.mei)
+        expect(r6.problems).toEqual([])
+        expect(r6.mei.match(/<measure\b/g)).toHaveLength(2)
     })
 
     it("handles Open Hymnal style header comments and staves directives", () => {

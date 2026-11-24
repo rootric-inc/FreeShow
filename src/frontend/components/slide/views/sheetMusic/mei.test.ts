@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, countMeasures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, countMeasures, extractHeaderMetadata, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -25,6 +25,22 @@ describe("mei pure helpers", () => {
         const mei = `<mei><meiHead><titleStmt><title>Peace &amp; Joy &lt;1&gt; &quot;A&quot; &apos;B&apos; &#8217; &#x00C5;se</title></titleStmt></meiHead></mei>`
         expect(extractTitle(mei)).toBe(`Peace & Joy <1> "A" 'B' ’ Åse`)
         expect(extractTitle("<mei><music/></mei>")).toBe("")
+    })
+
+    it("extracts title, composer, lyricist and copyright from meiHead", () => {
+        const mei = `<mei><meiHead><fileDesc><titleStmt><title>Abide With Me</title><respStmt><persName role="composer">William H. Monk</persName><persName role="lyricist">Henry F. Lyte</persName></respStmt></titleStmt><pubStmt><availability><distributor>Public Domain &amp; Free</distributor></availability></pubStmt></fileDesc></meiHead></mei>`
+        expect(extractHeaderMetadata(mei)).toEqual({
+            title: "Abide With Me",
+            composer: "William H. Monk",
+            lyricist: "Henry F. Lyte",
+            copyright: "Public Domain & Free"
+        })
+        expect(extractHeaderMetadata("<mei><music/></mei>")).toEqual({
+            title: "",
+            composer: "",
+            lyricist: "",
+            copyright: ""
+        })
     })
 
     it("counts measures in MEI", () => {

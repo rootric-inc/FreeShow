@@ -99,20 +99,35 @@ function getFilteredLogLines(rawLog: string): string[] {
 describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-music/verovio-module.mjs from preBuild)", () => {
     let handleMessage: (message: Record<string, unknown>) => Promise<any>
     let getLastRenderLog: () => string
+    let getLastRenderLayouts: () => number
 
     beforeAll(async () => {
         const mod = await import(/* @vite-ignore */ workerModuleHref)
         handleMessage = mod.handleMessage
         getLastRenderLog = mod.getLastRenderLog
+        getLastRenderLayouts = mod.getLastRenderLayouts
     })
 
     it("loads MusicXML into normalized MEI without meiHead and with bar.thru set to false", async () => {
         const loaded = await handleMessage({ type: "load", text: SAMPLE_MUSICXML })
 
         expect(loaded.title).toBe("Short & Sweet")
+        expect(loaded.composer).toBe("")
+        expect(loaded.lyricist).toBe("")
+        expect(loaded.copyright).toBe("")
         expect(loaded.measures).toBe(4)
         expect(loaded.mei).toContain('bar.thru="false"')
         expect(loaded.mei).not.toContain("<meiHead")
+    })
+
+    it("returns composer, lyricist and copyright from MusicXML metadata when present", async () => {
+        const withMetaXml = SAMPLE_MUSICXML.replace("<work><work-title>Short &amp; Sweet</work-title></work>", '<work><work-title>Abide With Me</work-title></work><identification><creator type="composer">William H. Monk</creator><creator type="lyricist">Henry F. Lyte</creator><rights>Public domain &amp; free</rights></identification>')
+
+        const loaded = await handleMessage({ type: "load", text: withMetaXml })
+        expect(loaded.title).toBe("Abide With Me")
+        expect(loaded.composer).toBe("William H. Monk")
+        expect(loaded.lyricist).toBe("Henry F. Lyte")
+        expect(loaded.copyright).toBe("Public domain & free")
     })
 
     it("renders MEI to SVG with the reply shape engine.ts reads and fits within a requested box ratio", async () => {
@@ -469,5 +484,66 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(getFilteredLogLines(getLastRenderLog())).toEqual([])
         const drawnNumbers = [...numberedRender.svg.matchAll(/<g[^>]*class="[^"]*\bmNum\b[^"]*"[^>]*>[\s\S]*?<\/g>/g)].map((match) => match[0].replace(/<[^>]+>/g, "").trim())
         expect(drawnNumbers).toEqual(Array.from({ length: 16 }, (_, i) => String(i + 1)))
+    })
+
+    it("fills the full width on a one-row drawing and leaves a short last row natural on a two-row drawing (F1)", async () => {
+        const makeBar = (n: number) => `<measure n="${n}"><staff n="1"><layer n="1"><note dur="4" oct="4" pname="c"/><note dur="4" oct="4" pname="d"/><note dur="4" oct="4" pname="e"/><note dur="4" oct="4" pname="f"/></layer></staff></measure>`
+        const makeMei = (barCount: number) => `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp bar.thru="false"><staffDef n="1" lines="5" clef.shape="G" clef.line="2"/></staffGrp></scoreDef><section>${Array.from({ length: barCount }, (_, i) => makeBar(i + 1)).join("")}</section></score></mdiv></body></music></mei>`
+
+        const getLastSystemBarlineRight = (svg: string) => {
+            const systems = svg.split(/<g\b[^>]*\bclass="[^"]*\bsystem\b[^"]*"[^>]*>/)
+            const lastSystem = systems[systems.length - 1]
+            const innerVb = svg.match(/class="definition-scale"[^>]*viewBox="0 0 (\d+)/)
+            const marginMatch = svg.match(/class="page-margin"[^>]*transform="translate\((\d+)/)
+            const innerWidth = innerVb ? Number(innerVb[1]) : 0
+            const marginX = marginMatch ? Number(marginMatch[1]) : 0
+            const usableRight = innerWidth - 2 * marginX
+            let maxX = 0
+            for (const match of lastSystem.matchAll(/d="M(\d+)\s+\d+\s+L(\d+)\s+\d+"/g)) {
+                maxX = Math.max(maxX, Number(match[1]), Number(match[2]))
+            }
+            return { systemCount: systems.length - 1, maxX, usableRight }
+        }
+
+        // One-row drawing (2 bars at wide pageWidth) fills the full usable width
+        const oneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840 })
+        const oneRowStats = getLastSystemBarlineRight(oneRow.svg)
+        expect(oneRowStats.systemCount).toBe(1)
+        expect(oneRowStats.maxX).toBeGreaterThan(oneRowStats.usableRight * 0.95)
+
+        // Two-row drawing with a short last row (5 bars at width 1200 -> 4 bars on row 1, 1 bar on row 2) ends well before the right edge
+        const twoRows = await handleMessage({ type: "render", mei: makeMei(5), pageWidth: 1200 })
+        const twoRowStats = getLastSystemBarlineRight(twoRows.svg)
+        expect(twoRowStats.systemCount).toBe(2)
+        expect(twoRowStats.maxX).toBeLessThan(twoRowStats.usableRight * 0.75)
+        expect(getLastRenderLayouts()).toBe(2)
+
+        // Fitted one-row drawing fills full width in 1 layout
+        const fittedOneRow = await handleMessage({ type: "render", mei: makeMei(2), pageWidth: 1840, ratio: 0.4 })
+        const fittedOneRowStats = getLastSystemBarlineRight(fittedOneRow.svg)
+        expect(fittedOneRowStats.systemCount).toBe(1)
+        expect(fittedOneRowStats.maxX).toBeGreaterThan(fittedOneRowStats.usableRight * 0.95)
+        expect(getLastRenderLayouts()).toBe(1)
+
+        // Fitted multi-row drawing runs the second justification pass once on the chosen layout, not at every search step
+        const multiRowMei = makeMei(13)
+        const fittedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
+        const fittedMultiLayouts = getLastRenderLayouts()
+        const fittedMultiStats = getLastSystemBarlineRight(fittedMulti.svg)
+        expect(fittedMulti.fits).toBe(true)
+        expect(fittedMultiStats.systemCount).toBeGreaterThan(1)
+        expect(fittedMultiStats.maxX).toBeLessThan(fittedMultiStats.usableRight * 0.75)
+        expect(fittedMultiLayouts).toBeLessThanOrEqual(9)
+
+        // Repeating the same fit request or a narrower preferred width reuses the finalized canonical drawing identically
+        const repeatedMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 1200, ratio: 0.4 })
+        expect(repeatedMulti.pageWidth).toBe(fittedMulti.pageWidth)
+        expect(repeatedMulti.svg).toBe(fittedMulti.svg)
+        expect(getLastRenderLayouts()).toBe(1)
+
+        const narrowerMulti = await handleMessage({ type: "render", mei: multiRowMei, pageWidth: 900, ratio: 0.4 })
+        expect(narrowerMulti.pageWidth).toBe(fittedMulti.pageWidth)
+        expect(narrowerMulti.svg).toBe(fittedMulti.svg)
+        expect(getLastRenderLayouts()).toBe(1)
     })
 })

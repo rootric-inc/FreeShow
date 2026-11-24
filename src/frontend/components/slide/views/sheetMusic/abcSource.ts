@@ -21,8 +21,9 @@ export interface AbcInsertResult {
 export const ABC_KEYS: readonly string[] = "C G D A E B F# F Bb Eb Ab Db Gb Am Em Bm F#m C#m Dm Gm Cm Fm Bbm".split(" ")
 export const ABC_METERS: readonly string[] = "4/4 3/4 2/4 6/8 3/2 2/2 6/4 9/8 12/8 none".split(" ")
 
-const KEY_TOKEN_PATTERN = /^(?:none|H[Pp]|[A-G][#b]?(?:major|maj|minor|min|m|ionian|ion|dorian|dor|phrygian|phr|lydian|lyd|mixolydian|mix|aeolian|aeo|locrian|loc)?(?:\s+(?:major|maj|minor|min|m|ionian|ion|dorian|dor|phrygian|phr|lydian|lyd|mixolydian|mix|aeolian|aeo|locrian|loc))?)(?=\s|$)/i
-const METER_TOKEN_PATTERN = /^(?:[Nn][Oo][Nn][Ee]|C\|?|\(?[0-9+]+(?:\s*\/\s*[0-9]+)?\)?)(?=\s|$)/
+export const KEY_TOKEN_PATTERN = /^(?:none|H[Pp]|[A-G][#b]?(?:major|maj|minor|min|m|ionian|ion|dorian|dor|phrygian|phr|lydian|lyd|mixolydian|mix|aeolian|aeo|locrian|loc)?(?:\s+(?:major|maj|minor|min|m|ionian|ion|dorian|dor|phrygian|phr|lydian|lyd|mixolydian|mix|aeolian|aeo|locrian|loc))?)(?=\s|$)/i
+export const METER_TOKEN_PATTERN = /^(?:[Nn][Oo][Nn][Ee]|C\|?|\(?[0-9+]+(?:\s*\/\s*[0-9]+)?\)?)(?=\s|$)/
+export const LENGTH_TOKEN_PATTERN = /^[0-9]+\s*\/\s*[0-9]+(?=\s|$)/
 
 export const normalizeLineEndings = (text: string): string => text.replace(/\r\n?/g, "\n")
 
@@ -99,28 +100,41 @@ function findHeaderEnd(lines: string[]): number {
     return lines.length - 1
 }
 
-function replaceHeaderToken(field: "K" | "M", valuePart: string, replacement: string): string {
+export function replaceHeaderToken(field: "K" | "M" | "L", valuePart: string, replacement: string): string {
     if (!valuePart) return replacement
-    const tokenPattern = field === "K" ? KEY_TOKEN_PATTERN : METER_TOKEN_PATTERN
+    const tokenPattern = field === "K" ? KEY_TOKEN_PATTERN : field === "M" ? METER_TOKEN_PATTERN : LENGTH_TOKEN_PATTERN
     const match = tokenPattern.exec(valuePart)
     if (match) return `${replacement}${valuePart.slice(match[0].length)}`
     return `${replacement} ${valuePart}`
 }
 
-export function updateAbcHeaderField(abc: string, field: "K" | "M", value: string): string {
+export function updateAbcHeaderField(abc: string, field: "K" | "M" | "L", value: string): string {
     const cleanValue = value.trim()
     if (!cleanValue) return abc
     const lineEnding = abc.includes("\r\n") ? "\r\n" : "\n"
     const lines = normalizeLineEndings(abc).split("\n")
     const headerEnd = findHeaderEnd(lines)
     const linePattern = new RegExp(`^(\\s*${field}:\\s*)([^%\\n]*?)(\\s*%.*)?$`)
+    let inTextBlock = false
+    let lastMatchIndex = -1
     for (let index = 0; index <= headerEnd; index++) {
-        const match = linePattern.exec(lines[index])
-        if (match) {
-            const updatedValue = replaceHeaderToken(field, match[2], cleanValue)
-            lines[index] = `${match[1]}${updatedValue}${match[3] || ""}`
-            return lines.join(lineEnding)
+        const trimmed = lines[index].trim()
+        if (/^%%begintext\b/i.test(trimmed)) {
+            inTextBlock = true
+            continue
         }
+        if (/^%%endtext\b/i.test(trimmed)) {
+            inTextBlock = false
+            continue
+        }
+        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (linePattern.test(lines[index])) lastMatchIndex = index
+    }
+    if (lastMatchIndex >= 0) {
+        const match = linePattern.exec(lines[lastMatchIndex])!
+        const updatedValue = replaceHeaderToken(field, match[2], cleanValue)
+        lines[lastMatchIndex] = `${match[1]}${updatedValue}${match[3] || ""}`
+        return lines.join(lineEnding)
     }
 
     const headerLines = lines.slice(0, headerEnd + 1)
@@ -129,6 +143,11 @@ export function updateAbcHeaderField(abc: string, field: "K" | "M", value: strin
         const beforeLengthOrKey = headerLines.findIndex((line) => /^\s*(?:L|K):/.test(line))
         const afterTitle = headerLines.findIndex((line) => /^\s*T:/.test(line))
         insertIndex = beforeLengthOrKey >= 0 ? beforeLengthOrKey : afterTitle >= 0 ? afterTitle + 1 : 0
+    } else if (field === "L") {
+        const beforeKey = headerLines.findIndex((line) => /^\s*K:/.test(line))
+        const afterMeter = headerLines.findIndex((line) => /^\s*M:/.test(line))
+        const afterTitle = headerLines.findIndex((line) => /^\s*T:/.test(line))
+        insertIndex = beforeKey >= 0 ? beforeKey : afterMeter >= 0 ? afterMeter + 1 : afterTitle >= 0 ? afterTitle + 1 : 0
     } else {
         for (let index = 0; index <= headerEnd; index++) {
             if (/^\s*(?:[XTMLCQZ]:|%%)/.test(lines[index])) insertIndex = index + 1

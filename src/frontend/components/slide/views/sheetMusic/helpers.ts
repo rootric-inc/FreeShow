@@ -83,6 +83,20 @@ export function mergeSheetMusicOwnedFields(existing: unknown, incoming: unknown)
     return next
 }
 
+export function hasHiddenInitialMeter(mei: string): boolean {
+    if (typeof mei !== "string" || !mei) return false
+    const scoreDefMatch = /<scoreDef\b[^>]*\/>|<scoreDef\b[^>]*>[\s\S]*?<\/scoreDef>/.exec(mei)
+    if (!scoreDefMatch) return false
+    const block = scoreDefMatch[0]
+    if (/<(?:scoreDef|staffDef)\b[^>]*\bmeter\.visible\s*=\s*(?:"false"|'false')/.test(block)) return true
+    if (/<meterSig\b[^>]*\bvisible\s*=\s*(?:"false"|'false')/.test(block)) return true
+    return false
+}
+
+export function shouldHideInitialMeterForEdit(sheetMusic: unknown): boolean {
+    return Boolean(getSheetMusicAbc(sheetMusic)) && hasHiddenInitialMeter(getSheetMusicData(sheetMusic))
+}
+
 export function getSheetMusicDisplayLabel(sheetMusic: unknown): string {
     const label = getSheetMusicLabel(sheetMusic)
     const measures = getSheetMusicMeasures(sheetMusic).trim()

@@ -51,6 +51,7 @@ export interface VoiceMeasure {
     hasNotes: boolean
     barType?: string
     leftBarType?: string
+    closedByNextLine?: boolean
     change?: { key?: KeySignature; meter?: Meter; clef?: { type?: string } }
     startChar?: number
     endChar?: number
@@ -213,21 +214,29 @@ function isMusicSourceLine(trimmed: string, inTextBlock: boolean): boolean {
 }
 
 export function findSecondTuneLine(sourceLines: string[]): number {
-    let inTextBlock = false
+    let inBlock = false
     let firstTuneStarted = false
+    let seenX = false
     for (let index = 0; index < sourceLines.length; index++) {
         const trimmed = sourceLines[index].trim()
-        if (/^%%begintext\b/i.test(trimmed)) {
-            inTextBlock = true
+        if (/^%%begin(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = true
             continue
         }
-        if (/^%%endtext\b/i.test(trimmed)) {
-            inTextBlock = false
+        if (/^%%end(?:text|ps)\b/i.test(trimmed)) {
+            inBlock = false
             continue
         }
-        if (inTextBlock || !trimmed || trimmed.startsWith("%")) continue
-        if (firstTuneStarted && /^X:/.test(trimmed)) return index
-        firstTuneStarted = true
+        if (inBlock || !trimmed || trimmed.startsWith("%")) continue
+        if (/^X:/.test(trimmed)) {
+            if (seenX || firstTuneStarted) return index
+            seenX = true
+            firstTuneStarted = true
+            continue
+        }
+        if (/^[A-Za-z]:/.test(trimmed)) {
+            firstTuneStarted = true
+        }
     }
     return -1
 }
@@ -429,6 +438,44 @@ export function splitVoiceIntoMeasures(voice: AbcElem[], normalized: string, isP
     return measures
 }
 
+function resolveLeadingLineBarlines(parsedLines: VoiceMeasure[][][][]): void {
+    for (let lineIndex = 1; lineIndex < parsedLines.length; lineIndex++) {
+        const prevLine = parsedLines[lineIndex - 1]
+        const curLine = parsedLines[lineIndex]
+        for (let staffIndex = 0; staffIndex < curLine.length; staffIndex++) {
+            const curStaff = curLine[staffIndex]
+            const prevStaff = prevLine[staffIndex]
+            if (!curStaff || !prevStaff) continue
+            for (let voiceIndex = 0; voiceIndex < curStaff.length; voiceIndex++) {
+                const curMeasures = curStaff[voiceIndex]
+                const prevMeasures = prevStaff[voiceIndex]
+                if (!curMeasures?.length || !prevMeasures?.length) continue
+                const firstMeasure = curMeasures[0]
+                const prevLastMeasure = prevMeasures[prevMeasures.length - 1]
+                if (!firstMeasure.leftBarType || !prevLastMeasure.events.length || prevLastMeasure.barType) continue
+
+                if (firstMeasure.leftBarType === "bar_left_repeat") {
+                    prevLastMeasure.barType = "bar_thin"
+                    prevLastMeasure.closedByNextLine = true
+                } else if (firstMeasure.leftBarType === "bar_thick_thin") {
+                    prevLastMeasure.barType = "bar_invisible"
+                    prevLastMeasure.closedByNextLine = true
+                } else {
+                    prevLastMeasure.barType = firstMeasure.leftBarType
+                    prevLastMeasure.closedByNextLine = true
+                    firstMeasure.leftBarType = undefined
+                }
+            }
+        }
+    }
+}
+
+export function splitTuneIntoMeasures(lines: { staff: Staff[] }[], normalized: string, onBar?: (element: RawAbcElem) => void, onOther?: (element: RawAbcElem) => void, collectClef = false): VoiceMeasure[][][][] {
+    const parsedLines = lines.map((line) => line.staff.map((staff, staffIndex) => (staff.voices || []).map((voice, voiceIndex) => splitVoiceIntoMeasures(voice, normalized, staffIndex === 0 && voiceIndex === 0, onBar, onOther, collectClef && voiceIndex === 0))))
+    resolveLeadingLineBarlines(parsedLines)
+    return parsedLines
+}
+
 function collectPitchIntervals(measure: VoiceMeasure | undefined, normalized: string, keySemitones: Record<string, number>, barAccidentals: Record<string, number>): PitchInterval[] {
     if (!measure || !measure.events.length) return []
     const intervals: PitchInterval[] = []
@@ -494,6 +541,8 @@ function collectAlignedBars(tune: TuneObject, normalized: string): AlignedBar[] 
     const carriedBarAccidentals: Record<string, Record<string, number>> = {}
     const lastVoiceRange = new Map<string, { startChar: number; endChar: number }>()
 
+    const parsedLines = splitTuneIntoMeasures(lines, normalized)
+
     lines.forEach((line, lineIndex) => {
         if (lineIndex > 0 && line.staff[0] && line.staff[0].meter) {
             meter = line.staff[0].meter
@@ -503,7 +552,7 @@ function collectAlignedBars(tune: TuneObject, normalized: string): AlignedBar[] 
             keySemitones = getKeySemitoneMap(line.staff[0].key)
         }
 
-        const parsedVoices = line.staff.map((staff, staffIndex) => (staff.voices || []).map((voice, voiceIndex) => splitVoiceIntoMeasures(voice, normalized, staffIndex === 0 && voiceIndex === 0)))
+        const parsedVoices = parsedLines[lineIndex]
         const measureCount = Math.max(0, ...parsedVoices.flat().map((measures) => measures.length))
         if (!measureCount) return
 

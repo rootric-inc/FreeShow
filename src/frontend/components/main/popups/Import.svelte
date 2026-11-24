@@ -27,10 +27,11 @@
     const freeshow_primary_formats = freeshow_formats.filter((format) => ["freeshow", "freeshow_project"].includes(format.id))
     const freeshow_more_formats = freeshow_formats.filter((format) => ["freeshow_template", "freeshow_overlay", "freeshow_action", "freeshow_stage", "freeshow_theme"].includes(format.id))
 
-    const text_formats: { name: string; extensions: string[]; id: string; shortcut?: string; tutorial?: string }[] = [
+    const text_formats: { name: string; extensions: string[]; id: string; icon?: string; click?: () => void; shortcut?: string; tutorial?: string }[] = [
         { name: "formats.text", extensions: ["txt"], id: "txt" },
         { name: "CSV", extensions: ["csv"], id: "csv" },
         { name: "ChordPro", extensions: ["cho", "crd", "chopro", "chordpro", "chord", "pro", "txt", "onsong"], id: "chordpro" },
+        { name: "items.sheet_music", extensions: [], id: "sheet_music", icon: "music", click: openSheetMusic },
         { name: "Word", extensions: ["doc", "docx"], id: "word" },
         { name: "ProPresenter", extensions: ["pro4", "pro5", "pro6", "pro", "json", "proBundle"], id: "propresenter" },
         {
@@ -98,6 +99,10 @@
         const name = translateText(format.name)
         sendMain(Main.IMPORT, { channel: format.id, format: { ...format, name } })
         displayTutorial(format)
+    }
+
+    function openSheetMusic() {
+        activePopup.set("import_sheet_music")
     }
 
     // function openCalendar() {
@@ -307,13 +312,23 @@
                 variant="outlined"
                 style="justify-content: start;width: calc((100% / 3) - (5px * 2 / 3));min-height: 50px;font-weight: normal;border: 1px solid var(--primary-lighter);"
                 on:click={() => {
+                    if (format.click) {
+                        format.click()
+                        return
+                    }
                     let name = translateText(format.name)
                     sendMain(Main.IMPORT, { channel: format.id, format: { ...format, name } })
                     displayTutorial(format)
                 }}
                 title={format.shortcut ? ` [${format.shortcut}]` : ""}
             >
-                <img style="height: 60px;width: 70px;" src="./import-logos/{format.id}.webp" alt="{format.id}-logo" draggable={false} />
+                {#if format.icon}
+                    <div class="iconBox">
+                        <Icon id={format.icon} size={2.2} white />
+                    </div>
+                {:else}
+                    <img style="height: 60px;width: 70px;" src="./import-logos/{format.id}.webp" alt="{format.id}-logo" draggable={false} />
+                {/if}
                 <p>{translateText(format.name)}</p>
             </MaterialButton>
         {/each}
@@ -333,6 +348,17 @@
         object-fit: contain;
         padding: 10px;
         padding-left: 0;
+    }
+
+    .iconBox {
+        height: 60px;
+        width: 70px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px;
+        padding-left: 0;
+        flex-shrink: 0;
     }
 
     .freeshow {

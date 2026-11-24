@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { adjustCursorForEdit, createAbcTemplate, insertAbcAtCursor, readAbcHeader, updateAbcHeaderField } from "./abcSource"
-import { getSheetMusicAbc } from "./helpers"
+import { getSheetMusicAbc, shouldHideInitialMeterForEdit } from "./helpers"
 
 describe("abcSource templates and header helpers", () => {
     it("builds four-part, two-part and one-part templates", () => {
@@ -68,6 +68,14 @@ describe("abcSource templates and header helpers", () => {
         expect(updateAbcHeaderField(bodyMeterOnly, "M", "6/8")).toBe(["T: Song", "M: 6/8", "L: 1/4", "K: C", "C D E F |", "M: 3/4", "G A B |"].join("\n"))
     })
 
+    it("updates or inserts L: in the header", () => {
+        const withL = ["M: 4/4", "L: 1/4 % unit", "K: C", "C4 |"].join("\n")
+        expect(updateAbcHeaderField(withL, "L", "1/8")).toBe(["M: 4/4", "L: 1/8 % unit", "K: C", "C4 |"].join("\n"))
+
+        const withoutL = ["M: 4/4", "K: C", "C4 |"].join("\n")
+        expect(updateAbcHeaderField(withoutL, "L", "1/8")).toBe(["M: 4/4", "L: 1/8", "K: C", "C4 |"].join("\n"))
+    })
+
     it("adjusts a cursor offset across header edits without losing position in the body", () => {
         expect(adjustCursorForEdit(5, 20, 21, 2)).toBe(5)
         expect(adjustCursorForEdit(20, 20, 21, 2)).toBe(20)
@@ -84,11 +92,21 @@ describe("abcSource templates and header helpers", () => {
     })
 })
 
-describe("getSheetMusicAbc", () => {
+describe("getSheetMusicAbc and shouldHideInitialMeterForEdit", () => {
     it("reads abc safely and treats wrong types as missing", () => {
         expect(getSheetMusicAbc({ abc: "K:C\nC4 |" })).toBe("K:C\nC4 |")
         expect(getSheetMusicAbc({ abc: 123 })).toBe("")
         expect(getSheetMusicAbc(null)).toBe("")
         expect(getSheetMusicAbc(undefined)).toBe("")
+    })
+
+    it("keeps the initial meter hidden only when editing typed ABC whose music hides the meter (F2)", () => {
+        const hiddenMei = '<mei><scoreDef meter.count="4" meter.unit="4" meter.visible="false"/></mei>'
+        const visibleMei = '<mei><scoreDef meter.count="4" meter.unit="4"/></mei>'
+
+        expect(shouldHideInitialMeterForEdit({ abc: "K:C\nC4 |", data: hiddenMei })).toBe(true)
+        expect(shouldHideInitialMeterForEdit({ data: hiddenMei })).toBe(false)
+        expect(shouldHideInitialMeterForEdit({ abc: "", data: hiddenMei })).toBe(false)
+        expect(shouldHideInitialMeterForEdit({ abc: "K:C\nC4 |", data: visibleMei })).toBe(false)
     })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, mergeSheetMusicOwnedFields, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
+import { DEFAULT_ITEM_HEIGHT, DEFAULT_ITEM_WIDTH, SvgCache, calculatePageWidth, clampNotationSize, createRenderCacheKey, decodeBase64Text, escapeHtml, getItemRatioFromStyle, getPageWidthFromStyle, getSheetMusicCustomParts, getSheetMusicData, getSheetMusicDisplayLabel, getSheetMusicLabel, getSheetMusicMeasures, getSheetMusicParts, getSheetMusicSize, getSheetMusicVerses, hasHiddenInitialMeter, mergeSheetMusicOwnedFields, parseItemHeight, parseItemWidth, prefixSvgIds } from "./helpers"
 
 describe("sheetMusic page width and ratio math", () => {
     it("calculates page width for sizes 50, 100 and 200", () => {
@@ -205,5 +205,15 @@ describe("mergeSheetMusicOwnedFields", () => {
         // Clearing owned fields removes music fields and preserves choices
         const cleared = mergeSheetMusicOwnedFields(nextCongregation, {})
         expect(cleared).toEqual({ parts: "upper", verses: "1", size: 120 })
+    })
+})
+
+describe("hasHiddenInitialMeter", () => {
+    it("detects hidden initial meters on scoreDef, staffDef and meterSig without matching later scoreDefs", () => {
+        expect(hasHiddenInitialMeter('<mei><scoreDef keysig="0" meter.count="4" meter.unit="4" meter.visible="false"><staffGrp/></scoreDef></mei>')).toBe(true)
+        expect(hasHiddenInitialMeter('<mei><scoreDef><staffGrp><staffDef n="1" meter.count="4" meter.unit="4" meter.visible="false"/></staffGrp></scoreDef></mei>')).toBe(true)
+        expect(hasHiddenInitialMeter('<mei><scoreDef><staffGrp><staffDef n="1"><meterSig count="4" unit="4" visible="false"/></staffDef></staffGrp></scoreDef></mei>')).toBe(true)
+        expect(hasHiddenInitialMeter('<mei><scoreDef keysig="0" meter.count="4" meter.unit="4"><staffGrp/></scoreDef><section><scoreDef meter.visible="false"/></section></mei>')).toBe(false)
+        expect(hasHiddenInitialMeter("")).toBe(false)
     })
 })
