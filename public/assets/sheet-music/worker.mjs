@@ -1,6 +1,6 @@
 import createVerovioModule from "./verovio-module.mjs"
 import { VerovioToolkit, enableLogToBuffer } from "./verovio.mjs"
-import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, sanitizeSvg, svgFitsWidth } from "./mei.mjs"
+import { DEFAULT_PAGE_WIDTH, MAX_PAGE_WIDTH, MIN_PAGE_WIDTH, applyInitialMeter, calculateLyricWordSpace, chooseRowStarts, chooseTransposeInterval, countMeasures, extractHeaderMetadata, findFittingLayout, getActiveMeterAtMeasure, getRowWidths, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, insertSystemBreaks, normalizeMei, parseSvgViewBox, readSvgMeasureWidths, readSvgRowStarts, sanitizeSvg, svgFitsWidth, widenPageForRatio } from "./mei.mjs"
 
 const RENDER_OPTIONS = {
     inputFrom: "mei",
@@ -19,6 +19,11 @@ const RENDER_OPTIONS = {
 }
 
 const MULTI_ROW_MIN_LAST_JUSTIFICATION = 0.8
+const MEASURE_PAGE_WIDTH = 60000
+// The last row is stretched to the full width when it is at least this share of the widest row
+const MIN_LAST_ROW_SHARE = 0.5
+// Even rows may widen the page by this much to keep the drawing inside its box, which makes everything that much smaller
+const MAX_EVEN_ROWS_WIDENING = 1.02
 const DEFAULT_LYRIC_SIZE = 100
 const MIN_LYRIC_SIZE = 100
 const MAX_LYRIC_SIZE = 175
@@ -220,17 +225,18 @@ export async function handleMessage(message) {
 
         try {
             let layoutCount = 0
-            const runLayout = (width, minLastJustification) => {
+            const runLayout = (width, minLastJustification, overrides = null) => {
                 layoutCount++
                 // Reload from scratch with a fixed id seed so layouts never depend on earlier widths or call history
                 tk.resetOptions()
                 tk.resetXmlIdSeed(1)
-                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width }
+                const { mei: meiInput = renderMei, ...extraOptions } = overrides || {}
+                const renderOptions = { ...RENDER_OPTIONS, ...lyricOptions, minLastJustification, pageWidth: width, ...extraOptions }
                 if (drawMeasureNumbers) renderOptions.mnumInterval = 1
                 if (transposeInterval) renderOptions.transpose = transposeInterval
                 tk.setOptions(renderOptions)
                 tk.getLog()
-                const loaded = tk.loadData(renderMei)
+                const loaded = tk.loadData(meiInput)
                 if (!loaded) {
                     lastRenderLog = tk.getLog().trim()
                     throw createWorkerError("render_failed", "Could not render music")
@@ -245,11 +251,87 @@ export async function handleMessage(message) {
 
             const renderSearchAt = (width) => runLayout(width, RENDER_OPTIONS.minLastJustification)
 
-            const finalizeLayout = (result, width) => {
-                if (result.pages > 1 || countSvgSystems(result.svg) > 1) {
-                    return runLayout(width, MULTI_ROW_MIN_LAST_JUSTIFICATION)
+            // Draws the music with its rows cut at rowStarts (or all on one row) and nothing stretched, and reads how wide
+            // each bar is on its own. These widths do not depend on the page width.
+            const measureBarWidths = (rowStarts) => {
+                const options = rowStarts ? { mei: insertSystemBreaks(renderMei, rowStarts), breaks: "encoded" } : { breaks: "none" }
+                const drawn = runLayout(MEASURE_PAGE_WIDTH, 0, { ...options, noJustification: true, adjustPageWidth: true })
+                const widths = drawn.pages === 1 && countSvgSystems(drawn.svg) === (rowStarts ? rowStarts.length + 1 : 1) ? readSvgMeasureWidths(drawn.svg) : []
+                return widths.length === countMeasures(renderMei) && widths.every((width) => Number.isFinite(width) && width > 0) ? widths : null
+            }
+
+            // The width of every bar, and its width alone on a row, where it also carries the clef and key a row starts with
+            let barWidths
+            const measureBars = () => {
+                if (barWidths !== undefined) return barWidths
+                const plainWidths = measureBarWidths(null)
+                const startWidths = plainWidths && measureBarWidths(Array.from({ length: plainWidths.length - 1 }, (_, index) => index + 2))
+                barWidths = startWidths ? { plainWidths, startWidths } : null
+                return barWidths
+            }
+
+            // Draws the bars spread evenly over the rows of a drawing. Returns null when that is not possible or not better.
+            const drawEvenRows = (result, width) => {
+                try {
+                    const currentStarts = readSvgRowStarts(result.svg)
+                    const widths = measureBars()
+                    if (!widths) return null
+                    const { plainWidths, startWidths } = widths
+                    const rowStarts = chooseRowStarts(plainWidths, startWidths, currentStarts.length + 1)
+                    if (rowStarts.length !== currentStarts.length) return null
+
+                    const rowWidths = getRowWidths(plainWidths, startWidths, rowStarts)
+                    const lastRowIsShort = rowWidths[rowWidths.length - 1] < Math.max(...rowWidths) * MIN_LAST_ROW_SHARE
+                    // The rows are even already. Only the last row is stretched, unless it is too short for that.
+                    if (rowStarts.every((start, index) => start === currentStarts[index])) return lastRowIsShort ? null : { ...runLayout(width, 0), pageWidth: width }
+
+                    // Verovio squeezes a row that is too full. The bars' widths miss what a row gets at its end, such as the new
+                    // key before a key change, so the rows are measured as they will be drawn: the widest of the even rows must
+                    // fit the page, or be no wider than the widest row now.
+                    const evenWidths = measureBarWidths(rowStarts)
+                    const currentWidths = measureBarWidths(currentStarts)
+                    const drawnWidths = readSvgMeasureWidths(result.svg)
+                    if (!evenWidths || !currentWidths || drawnWidths.length !== evenWidths.length) return null
+                    const widest = (widths, starts) => Math.max(...getRowWidths(widths, widths, starts))
+                    if (widest(evenWidths, rowStarts) > Math.max(widest(currentWidths, currentStarts), widest(drawnWidths, currentStarts))) return null
+
+                    const evenMei = insertSystemBreaks(renderMei, rowStarts)
+                    const currentBox = parseSvgViewBox(result.svg)
+                    if (!currentBox) return null
+                    // Rows with other bars can be taller. In a box the drawing may not get taller than the box or than it was.
+                    const maxRatio = targetRatio === null ? Infinity : Math.max(targetRatio, currentBox.height / currentBox.width)
+                    const drawAt = (evenWidth) => {
+                        const drawn = runLayout(evenWidth, lastRowIsShort ? 1 : 0, { mei: evenMei, breaks: "encoded" })
+                        if (drawn.pages !== 1 || countSvgSystems(drawn.svg) !== rowStarts.length + 1) return null
+                        if (!svgFitsWidth(drawn.svg, lyricOptions.pageMarginRight)) return null
+                        const box = parseSvgViewBox(drawn.svg)
+                        return box ? { ...drawn, pageWidth: evenWidth, ratio: box.height / box.width } : null
+                    }
+
+                    let even = drawAt(width)
+                    if (even && even.ratio > maxRatio) {
+                        // A slightly wider page makes up for a little more height, at a small cost in size
+                        const widerWidth = widenPageForRatio(width, even.ratio, maxRatio, MAX_EVEN_ROWS_WIDENING)
+                        even = widerWidth === null ? null : drawAt(widerWidth)
+                    }
+                    if (!even || even.ratio > maxRatio) return null
+
+                    return { svg: even.svg, pages: even.pages, pageWidth: even.pageWidth }
+                } catch {
+                    return null
                 }
-                return result
+            }
+
+            const finalizeLayout = (result, width) => {
+                if (result.pages <= 1 && countSvgSystems(result.svg) <= 1) return { ...result, pageWidth: width }
+                const settled = { ...runLayout(width, MULTI_ROW_MIN_LAST_JUSTIFICATION), pageWidth: width }
+                // The search justifies every row. The same drawing here means the last row is full, and the rows stay.
+                if (result.pages > 1 || settled.svg === result.svg) return settled
+                const settledLog = lastRenderLog
+                const even = drawEvenRows(result, width)
+                if (even) return even
+                lastRenderLog = settledLog
+                return settled
             }
 
             if (targetRatio === null) {
@@ -259,7 +341,7 @@ export async function handleMessage(message) {
                 const cleanSvg = sanitizeSvg(finalResult.svg)
                 return {
                     svg: cleanSvg,
-                    pageWidth: clampedWidth,
+                    pageWidth: finalResult.pageWidth,
                     scale: 1,
                     fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg, lyricOptions.pageMarginRight),
                     pages: finalResult.pages
@@ -275,30 +357,36 @@ export async function handleMessage(message) {
 
             let finalSvg
             let finalPages = fitted.pages
+            let finalPageWidth = fitted.pageWidth
 
             if (usedCachedCanonical) {
                 finalSvg = cachedCanonical.svg
                 finalPages = cachedCanonical.pages
+                finalPageWidth = cachedCanonical.pageWidth
             } else {
                 const finalized = finalizeLayout({ svg: fitted.svg, pages: fitted.pages }, fitted.pageWidth)
                 finalSvg = sanitizeSvg(finalized.svg)
                 finalPages = finalized.pages
+                finalPageWidth = finalized.pageWidth
             }
 
             if (!cachedCanonical && fitted.canonical && !fitted.canonical.timedOut) {
                 let cleanCanonicalSvg
                 let canonicalPages = fitted.canonical.pages
+                let canonicalPageWidth = fitted.canonical.pageWidth
                 if (usedFreshCanonical) {
                     cleanCanonicalSvg = finalSvg
                     canonicalPages = finalPages
+                    canonicalPageWidth = finalPageWidth
                 } else {
                     const finalizedCanonical = finalizeLayout({ svg: fitted.canonical.svg, pages: fitted.canonical.pages }, fitted.canonical.pageWidth)
                     cleanCanonicalSvg = sanitizeSvg(finalizedCanonical.svg)
                     canonicalPages = finalizedCanonical.pages
+                    canonicalPageWidth = finalizedCanonical.pageWidth
                 }
                 setCanonicalMemo(canonicalKey, {
                     svg: cleanCanonicalSvg,
-                    pageWidth: fitted.canonical.pageWidth,
+                    pageWidth: canonicalPageWidth,
                     pages: canonicalPages,
                     fits: fitted.canonical.fits,
                     canonicalLayouts: fitted.canonical.canonicalLayouts,
@@ -307,10 +395,10 @@ export async function handleMessage(message) {
             }
 
             lastRenderLayouts = layoutCount
-            const scale = Math.min(1, clampedWidth / fitted.pageWidth)
+            const scale = Math.min(1, clampedWidth / finalPageWidth)
             return {
                 svg: finalSvg,
-                pageWidth: fitted.pageWidth,
+                pageWidth: finalPageWidth,
                 scale,
                 fits: fitted.fits,
                 pages: finalPages

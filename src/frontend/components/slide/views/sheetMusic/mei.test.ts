@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, measureSvgWidth, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import {
+    MAX_PAGE_WIDTH,
+    applyInitialMeter,
+    widenPageForRatio,
+    calculateLyricWordSpace,
+    getRowWidths,
+    chooseRowStarts,
+    chooseTransposeInterval,
+    countMeasures,
+    extractHeaderMetadata,
+    extractKeySignatures,
+    extractTitle,
+    findFittingLayout,
+    getActiveMeterAtMeasure,
+    hasMeterChangeAtMeasure,
+    hideInitialMeter,
+    hideMeasureNumbers,
+    insertSlicePageBreaks,
+    insertSystemBreaks,
+    measureSvgWidth,
+    normalizeMei,
+    parseKeySigFifths,
+    parseSvgViewBox,
+    readSvgMeasureWidths,
+    readSvgRowStarts,
+    sanitizeSvg,
+    svgFitsWidth
+} from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -289,5 +316,58 @@ describe("mei pure helpers", () => {
         expect(calculateLyricWordSpace(250)).toBe(3.2)
         expect(calculateLyricWordSpace(Number.NaN)).toBe(1.2)
         expect(calculateLyricWordSpace(undefined)).toBe(1.2)
+    })
+
+    it("chooses row starts that minimize the widest row, break ties by widest narrowest row, then earliest break", () => {
+        const plus = (widths: number[], add: number) => widths.map((w) => w + add)
+
+        expect(chooseRowStarts([677, 283, 507, 178, 421], plus([677, 283, 507, 178, 421], 130), 2)).toEqual([3])
+        expect(chooseRowStarts([340, 319, 410, 346, 353], plus([340, 319, 410, 346, 353], 130), 2)).toEqual([4])
+        expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 2)).toEqual([3])
+        expect(chooseRowStarts([100, 100, 100], [100, 100, 100], 2)).toEqual([2])
+        expect(chooseRowStarts([100, 100, 100, 100], [100, 100, 100, 100], 1)).toEqual([])
+
+        // the width of each row
+        expect(getRowWidths([677, 283, 507, 178, 421], plus([677, 283, 507, 178, 421], 130), [3])).toEqual([1090, 1236])
+        expect(getRowWidths([100, 100, 100], [150, 150, 150], [])).toEqual([350])
+
+        // a drawing 1 percent too tall fits on a page 1 percent wider, and one 5 percent too tall is given up
+        expect(widenPageForRatio(1000, 0.444, 0.44, 1.02)).toBe(1010)
+        expect(widenPageForRatio(1000, 0.4484, 0.44, 1.02)).toBe(1020)
+        expect(widenPageForRatio(1000, 0.449, 0.44, 1.02)).toBeNull()
+        expect(widenPageForRatio(1000, 0.462, 0.44, 1.02)).toBeNull()
+        expect(widenPageForRatio(MAX_PAGE_WIDTH, 0.4444, 0.44, 1.02)).toBeNull()
+        expect(chooseRowStarts([100, 200, 300], [100, 200, 300], 5)).toEqual([2, 3])
+        // Tie on widest row (120) breaks by maximizing the narrowest row (30 over 20)
+        expect(chooseRowStarts([10, 10, 10, 30], [20, 80, 100, 120], 3)).toEqual([3, 4])
+    })
+
+    it("reads bar widths and row starts from an SVG", () => {
+        const svg =
+            `<svg viewBox="0 0 1000 500"><g class="page-margin">` +
+            `<g class="system">` +
+            `<g class="measure"><g class="staff"><path d="M0 100 L300 100"/><path d="M0 120 L300 120"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M300 100 L550 100"/></g></g>` +
+            `</g>` +
+            `<g class="system">` +
+            `<g class="measure"><g class="staff"><path d="M0 300 L420 300"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M420 300 L700 300"/></g></g>` +
+            `<g class="measure"><g class="staff"><path d="M700 300 L950 300"/></g></g>` +
+            `</g>` +
+            `</g></svg>`
+
+        expect(readSvgMeasureWidths(svg)).toEqual([300, 250, 420, 280, 250])
+        expect(readSvgRowStarts(svg)).toEqual([3])
+        expect(readSvgRowStarts('<svg><g class="system"><g class="measure"/></g></svg>')).toEqual([])
+    })
+
+    it("strips existing system and page breaks and inserts sb tags before chosen measures", () => {
+        const plain = '<mei><section><measure n="1"><staff/></measure><measure n="2"><staff/></measure><measure n="3"><staff/></measure></section></mei>'
+        const withOldBreaks = '<mei><section><pb/><measure n="1"><staff/></measure><sb n="1"/><measure n="2"><staff/></measure><pb n="2"></pb><sb></sb><measure n="3"><staff/></measure></section></mei>'
+
+        const expected = '<mei><section><measure n="1"><staff/></measure><measure n="2"><staff/></measure><sb/><measure n="3"><staff/></measure></section></mei>'
+        expect(insertSystemBreaks(plain, [3])).toBe(expected)
+        expect(insertSystemBreaks(withOldBreaks, [3])).toBe(expected)
+        expect(insertSystemBreaks(withOldBreaks, [1, 2, 3])).toBe('<mei><section><measure n="1"><staff/></measure><sb/><measure n="2"><staff/></measure><sb/><measure n="3"><staff/></measure></section></mei>')
     })
 })

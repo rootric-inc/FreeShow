@@ -812,6 +812,169 @@ export function findFittingLayout(preferredWidth, targetRatio, renderAt, options
     }
 }
 
+export function insertSystemBreaks(mei, rowStarts) {
+    if (typeof mei !== "string") return mei
+    const starts = new Set(Array.isArray(rowStarts) ? rowStarts : [])
+    const cleaned = mei.replace(/<(sb|pb)(?:\s[^>]*)?\/>|<(sb|pb)(?:\s[^>]*)?>[\s\S]*?<\/\2>/g, "")
+    let measureIndex = 0
+    return cleaned.replace(/<measure(?=\s|>|\/)/g, (match) => {
+        measureIndex++
+        return measureIndex > 1 && starts.has(measureIndex) ? `<sb/>${match}` : match
+    })
+}
+
+export function readSvgMeasureWidths(svg) {
+    if (typeof svg !== "string") return []
+    const widths = []
+    const measureRe = /<g\b[^>]*\bclass=["'](?:[^"']*\s)?measure(?:\s[^"']*)?["'][^>]*>([\s\S]*?)(?=<g\b[^>]*\bclass=["'](?:[^"']*\s)?measure(?:\s[^"']*)?["']|$)/gi
+    const staffRe = /<g\b[^>]*\bclass=["'](?:[^"']*\s)?staff(?:\s[^"']*)?["'][^>]*>([\s\S]*)/i
+    const lineRe = /\bd=["']M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+L\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)["']/gi
+    let measureMatch
+    while ((measureMatch = measureRe.exec(svg)) !== null) {
+        const staffMatch = staffRe.exec(measureMatch[1])
+        const searchArea = staffMatch ? staffMatch[1] : measureMatch[1]
+        lineRe.lastIndex = 0
+        let lineMatch
+        while ((lineMatch = lineRe.exec(searchArea)) !== null) {
+            if (Number(lineMatch[2]) === Number(lineMatch[4])) {
+                widths.push(Math.abs(Number(lineMatch[3]) - Number(lineMatch[1])))
+                break
+            }
+        }
+    }
+    return widths
+}
+
+export function readSvgRowStarts(svg) {
+    if (typeof svg !== "string") return []
+    const starts = []
+    const groupRe = /<g\b[^>]*\bclass=["'](?:[^"']*\s)?(system|measure)(?:\s[^"']*)?["'][^>]*>/gi
+    let systemIndex = 0
+    let measureIndex = 0
+    let seenMeasureInSystem = false
+    let match
+    while ((match = groupRe.exec(svg)) !== null) {
+        if (match[1].toLowerCase() === "system") {
+            systemIndex++
+            seenMeasureInSystem = false
+        } else {
+            measureIndex++
+            if (systemIndex > 1 && !seenMeasureInSystem) {
+                starts.push(measureIndex)
+            }
+            seenMeasureInSystem = true
+        }
+    }
+    return starts
+}
+
+export function chooseRowStarts(plainWidths, startWidths, rowCount) {
+    if (!Array.isArray(plainWidths) || !Array.isArray(startWidths)) return []
+    const barCount = plainWidths.length
+    if (barCount <= 1 || startWidths.length !== barCount) return []
+    if (!Number.isInteger(rowCount) || rowCount <= 1) return []
+
+    const rows = Math.min(rowCount, barCount)
+    if (rows === barCount) {
+        return Array.from({ length: barCount - 1 }, (_, i) => i + 2)
+    }
+
+    const prefix = [0]
+    for (let i = 0; i < barCount; i++) {
+        if (typeof plainWidths[i] !== "number" || !Number.isFinite(plainWidths[i]) || plainWidths[i] <= 0) return []
+        if (typeof startWidths[i] !== "number" || !Number.isFinite(startWidths[i]) || startWidths[i] <= 0) return []
+        prefix.push(prefix[i] + plainWidths[i])
+    }
+
+    const rowWidth = (start, end) => startWidths[start] + (prefix[end] - prefix[start + 1])
+
+    const minMax = Array.from({ length: rows + 1 }, () => Array(barCount + 1).fill(Infinity))
+    minMax[0][0] = 0
+    for (let k = 1; k <= rows; k++) {
+        const maxEnd = barCount - (rows - k)
+        for (let end = k; end <= maxEnd; end++) {
+            let best = Infinity
+            for (let start = k - 1; start < end; start++) {
+                const prev = minMax[k - 1][start]
+                if (prev === Infinity) continue
+                const width = Math.max(prev, rowWidth(start, end))
+                if (width < best) best = width
+            }
+            minMax[k][end] = best
+        }
+    }
+    const bestMax = minMax[rows][barCount]
+    if (!Number.isFinite(bestMax)) return []
+
+    const maxMin = Array.from({ length: rows + 1 }, () => Array(barCount + 1).fill(-Infinity))
+    maxMin[0][0] = Infinity
+    for (let k = 1; k <= rows; k++) {
+        const maxEnd = barCount - (rows - k)
+        for (let end = k; end <= maxEnd; end++) {
+            let best = -Infinity
+            for (let start = k - 1; start < end; start++) {
+                const prev = maxMin[k - 1][start]
+                if (prev === -Infinity) continue
+                const width = rowWidth(start, end)
+                if (width > bestMax) continue
+                const narrowest = Math.min(prev, width)
+                if (narrowest > best) best = narrowest
+            }
+            maxMin[k][end] = best
+        }
+    }
+    const bestMin = maxMin[rows][barCount]
+    if (!Number.isFinite(bestMin)) return []
+
+    const canFinish = Array.from({ length: rows + 1 }, () => Array(barCount + 1).fill(false))
+    canFinish[0][barCount] = true
+    for (let remaining = 1; remaining <= rows; remaining++) {
+        for (let start = 0; start <= barCount - remaining; start++) {
+            for (let end = start + 1; end <= barCount - (remaining - 1); end++) {
+                if (!canFinish[remaining - 1][end]) continue
+                const width = rowWidth(start, end)
+                if (width >= bestMin && width <= bestMax) {
+                    canFinish[remaining][start] = true
+                    break
+                }
+            }
+        }
+    }
+
+    const starts = []
+    let pos = 0
+    for (let row = 1; row < rows; row++) {
+        const remaining = rows - row
+        for (let end = pos + 1; end <= barCount - remaining; end++) {
+            const width = rowWidth(pos, end)
+            if (width >= bestMin && width <= bestMax && canFinish[remaining][end]) {
+                starts.push(end + 1)
+                pos = end
+                break
+            }
+        }
+    }
+    return starts
+}
+
+// The width of each row when the bars are cut into rows at rowStarts. plainWidths holds the width of every bar and
+// startWidths its width when it starts a row.
+export function getRowWidths(plainWidths, startWidths, rowStarts) {
+    const bounds = [1, ...rowStarts, plainWidths.length + 1]
+    return bounds.slice(0, -1).map((start, row) => {
+        let width = startWidths[start - 1]
+        for (let bar = start + 1; bar < bounds[row + 1]; bar++) width += plainWidths[bar - 1]
+        return width
+    })
+}
+
+// The page width at which a drawing that is a little too tall for its box fits again: a wider page makes the drawing
+// lower in proportion. Returns null when that takes a page more than maxGrowth times as wide.
+export function widenPageForRatio(pageWidth, ratio, maxRatio, maxGrowth) {
+    const widerWidth = Math.ceil((pageWidth * ratio) / maxRatio)
+    return widerWidth <= Math.min(MAX_PAGE_WIDTH, pageWidth * maxGrowth) ? widerWidth : null
+}
+
 // The least gap between two words for a words size in percent. Verovio lets large words touch unless the gap grows
 // much faster than the words, so it reaches its full value at 150 and stays there.
 export function calculateLyricWordSpace(lyricSize, minWordSpace = 1.2, maxWordSpace = 3.2) {
