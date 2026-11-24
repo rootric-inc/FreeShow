@@ -683,6 +683,19 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(getLyricRenderOptions(175, true).pageMarginLeft).toBe(50)
         expect(getLyricRenderOptions(175, false).pageMarginLeft).toBe(10)
 
+        const twoStaves = (groupStart: string) =>
+            `<?xml version="1.0" encoding="UTF-8"?><mei xmlns="http://www.music-encoding.org/ns/mei" meiversion="5.1"><music><body><mdiv><score><scoreDef keysig="0" meter.count="4" meter.unit="4">${groupStart}<staffDef n="1" lines="5" clef.shape="G" clef.line="2" /><staffDef n="2" lines="5" clef.shape="F" clef.line="4" /></staffGrp></scoreDef><section><measure n="1"><staff n="1"><layer n="1"><note dur="1" pname="g" oct="4"><verse n="1"><syl>Praise</syl></verse></note></layer></staff><staff n="2"><layer n="1"><note dur="1" pname="g" oct="3" /></layer></staff></measure></section></score></mdiv></body></music></mei>`
+        const getLeftMargin = async (groupStart: string) => {
+            const rendered = await handleMessage({ type: "render", mei: twoStaves(groupStart), pageWidth: 1840, lyricSize: 175 })
+            return Number(rendered.svg.match(/class="page-margin" transform="translate\((\d+)/)?.[1])
+        }
+        expect(await getLeftMargin('<staffGrp symbol="brace" bar.thru="false">')).toBe(500)
+        expect(await getLeftMargin('<staffGrp bar.thru="false"><grpSym symbol="brace" />')).toBe(500)
+        expect(await getLeftMargin('<staffGrp symbol="bracket" bar.thru="false">')).toBe(500)
+        expect(await getLeftMargin('<staffGrp symbol="none" bar.thru="false">')).toBe(100)
+        expect(await getLeftMargin('<staffGrp bar.thru="false"><grpSym />')).toBe(100)
+        expect(await getLeftMargin('<staffGrp bar.thru="false">')).toBe(100)
+
         const hymnLineAbc = ["T: Doxology", "M: 4/4", "L: 1/4", "K: G", "[V:S] G2 G F | E2 D2 | G2 A2 | B4 |", "w: Praise God, from whom all bless-ings flow;"].join("\n")
 
         const mei = convertAndCheckAbc(hymnLineAbc, abcjs.parseOnly).mei
@@ -731,11 +744,38 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         expect(countSystems(fitted175.svg)).toBeGreaterThanOrEqual(countSystems(fitted100.svg))
     })
 
+    it("keeps neighbouring words apart when the words are drawn larger", async () => {
+        // Each case is a melody line whose two words came out touching: the first word, its width in the
+        // drawing's font in units of the font size, and the word after it
+        const cases = [
+            { abc: ["E | F A B A | ^G F/E/ A d | c d B B | A3", "w: Hark! How the heav'n-ly an-them * drowns all mu-sic but its own."], word: "drowns", width: 2.94, next: "all" },
+            { abc: ["D | G G B B | A G A B | A G B A | G3", "w: All hail the pow'r of Je-sus' Name! Let an-gels pros-trate fall;"], word: "Name!", width: 2.71, next: "Let" }
+        ]
+        const boxWidth = calculatePageWidth(1820, 200)
+        const boxRatio = getItemRatioFromStyle("width: 1820px; height: 800px;")
+
+        const getSyllables = (svg: string) => [...svg.matchAll(/<g[^>]*class="[^"]*\bsyl\b[^"]*"[^>]*>\s*<text x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>[\s\S]*?<tspan font-size="([\d.]+)px">([^<]*)<\/tspan>/g)].map((match) => ({ x: Number(match[1]), y: Number(match[2]), size: Number(match[3]), text: match[4] }))
+
+        for (const { abc, word, width, next } of cases) {
+            const mei = convertAndCheckAbc(["T: Words", "M: 4/4", "L: 1/4", "K: D", ...abc].join("\n"), abcjs.parseOnly).mei
+            for (const lyricSize of [125, 150, 175]) {
+                const rendered = await handleMessage({ type: "render", mei, pageWidth: boxWidth, ratio: boxRatio, lyricSize })
+                const syllables = getSyllables(rendered.svg)
+                const index = syllables.findIndex((syllable) => syllable.text === word)
+                expect(index).toBeGreaterThanOrEqual(0)
+                expect(syllables[index + 1].text).toBe(next)
+                // Both words are on one row, and the gap after the first is at least a fifth of the font size
+                expect(syllables[index + 1].y).toBe(syllables[index].y)
+                expect((syllables[index + 1].x - syllables[index].x) / syllables[index].size).toBeGreaterThanOrEqual(width + 0.2)
+            }
+        }
+    })
+
     it("tightens margins and sets lyric word space and staff spacing above 100, leaves 100 identical to omitted, logs nothing at 175, and clamps bad lyricSize values", async () => {
         expect(getLyricRenderOptions(100)).toEqual({})
         expect(getLyricRenderOptions(137.5)).toEqual({
             lyricSize: 6.1875,
-            lyricWordSpace: 1.4,
+            lyricWordSpace: 2.7,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,
@@ -745,7 +785,7 @@ describe.skipIf(!hasVerovio)("sheet music worker (requires public/assets/sheet-m
         })
         expect(getLyricRenderOptions(175)).toEqual({
             lyricSize: 7.875,
-            lyricWordSpace: 1.6,
+            lyricWordSpace: 3.2,
             pageMarginTop: 10,
             pageMarginBottom: 10,
             pageMarginLeft: 10,

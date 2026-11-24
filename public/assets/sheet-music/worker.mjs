@@ -25,7 +25,7 @@ const MAX_LYRIC_SIZE = 175
 const VEROVIO_DEFAULT_LYRIC_SIZE = 4.5
 const VEROVIO_MAX_LYRIC_SIZE = 8.0
 const VEROVIO_DEFAULT_LYRIC_WORD_SPACE = 1.2
-const VEROVIO_MAX_LYRIC_WORD_SPACE = 1.6
+const VEROVIO_MAX_LYRIC_WORD_SPACE = 3.2
 // Small margins give large words more of the box. A brace or bracket hangs left of the staves and needs the full
 // left margin, and a last syllable can hang past the last note, so the right margin stays a little wider.
 const LARGE_LYRIC_PAGE_MARGIN = 10
@@ -49,9 +49,9 @@ export function getLyricRenderOptions(lyricSize, hasGroupSymbol = false) {
     }
 }
 
-// True when the music draws a brace or bracket in front of its staves.
+// True when the music draws a brace or bracket in front of its staves. A group with no symbol named draws none.
 function hasGroupSymbol(mei) {
-    return /<grpSym\b/.test(mei) || /<staffGrp\b[^>]*\bsymbol="(?!none")/.test(mei)
+    return /<(?:grpSym|staffGrp)\b[^>]*\bsymbol="(?!none")/.test(mei)
 }
 
 function countSvgSystems(svg) {
@@ -261,14 +261,14 @@ export async function handleMessage(message) {
                     svg: cleanSvg,
                     pageWidth: clampedWidth,
                     scale: 1,
-                    fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg),
+                    fits: finalResult.pages <= 1 && svgFitsWidth(cleanSvg, lyricOptions.pageMarginRight),
                     pages: finalResult.pages
                 }
             }
 
             const canonicalKey = `${targetRatio}:${drawMeasureNumbers ? "mnum" : ""}:${transposeSemitones || ""}:${lyricSizePercent > DEFAULT_LYRIC_SIZE ? lyricSizePercent : ""}:${mei}`
             const cachedCanonical = getCanonicalMemo(canonicalKey)
-            const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical })
+            const fitted = findFittingLayout(clampedWidth, targetRatio, renderSearchAt, { canonical: cachedCanonical, marginRight: lyricOptions.pageMarginRight })
 
             const usedCachedCanonical = Boolean(cachedCanonical && fitted.svg === cachedCanonical.svg)
             const usedFreshCanonical = Boolean(!cachedCanonical && fitted.canonical && fitted.svg === fitted.canonical.svg)

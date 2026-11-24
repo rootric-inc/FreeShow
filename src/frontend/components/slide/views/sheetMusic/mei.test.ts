@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { applyInitialMeter, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
+import { applyInitialMeter, measureSvgWidth, calculateLyricWordSpace, chooseTransposeInterval, countMeasures, extractHeaderMetadata, extractKeySignatures, extractTitle, findFittingLayout, getActiveMeterAtMeasure, hasMeterChangeAtMeasure, hideInitialMeter, hideMeasureNumbers, insertSlicePageBreaks, normalizeMei, parseKeySigFifths, parseSvgViewBox, sanitizeSvg, svgFitsWidth } from "../../../../../../public/assets/sheet-music/mei.mjs"
 
 describe("mei pure helpers", () => {
     it("normalizes MEI by removing xml-model, meiHead, labels, whitespace and setting bar.thru to false", () => {
@@ -148,6 +148,15 @@ describe("mei pure helpers", () => {
         expect(svgFitsWidth(overflowSvg)).toBe(false)
         expect(svgFitsWidth(zeroUsableSvg)).toBe(false)
         expect(svgFitsWidth('<svg viewBox="0 0 400 280"></svg>')).toBe(true)
+
+        // With a left margin of 10 and a right margin of 30 the staff may be 3600 wide. A note 100 past its end does not fit,
+        // which a check that takes both margins as 10 would miss
+        const unevenSvg = (noteX: number) => `<svg viewBox="0 0 400 280"><svg class="definition-scale" viewBox="0 0 4000 2800"><g class="page-margin" transform="translate(100, 100)"><g class="staff"><path d="M0 540 L3600 540"/><g class="note"><use transform="translate(${noteX}, 1170)"/></g></g></g></svg></svg>`
+        expect(svgFitsWidth(unevenSvg(3500), 30)).toBe(true)
+        expect(svgFitsWidth(unevenSvg(3700), 30)).toBe(false)
+        expect(svgFitsWidth(unevenSvg(3700))).toBe(true)
+        expect(measureSvgWidth(unevenSvg(3500), 30).neededWidth).toBe(400)
+        expect(measureSvgWidth(unevenSvg(3500)).neededWidth).toBe(380)
     })
 
     it("fits immediately when preferred width satisfies ratio on one page", () => {
@@ -268,15 +277,16 @@ describe("mei pure helpers", () => {
         expect(chooseTransposeInterval(cMajor, 12)).toBe("")
     })
 
-    it("calculates lyricWordSpace linearly from 1.2 at 100 to 1.6 at 175 and clamps outside the range", () => {
+    it("calculates lyricWordSpace linearly from 1.2 at 100 to 3.2 at 150 and clamps outside the range", () => {
         expect(calculateLyricWordSpace(100)).toBe(1.2)
-        expect(calculateLyricWordSpace(137.5)).toBe(1.4)
-        expect(calculateLyricWordSpace(175)).toBe(1.6)
+        expect(calculateLyricWordSpace(125)).toBe(2.2)
+        expect(calculateLyricWordSpace(150)).toBe(3.2)
+        expect(calculateLyricWordSpace(175)).toBe(3.2)
         expect(calculateLyricWordSpace(99)).toBe(1.2)
         expect(calculateLyricWordSpace(50)).toBe(1.2)
         expect(calculateLyricWordSpace(0)).toBe(1.2)
         expect(calculateLyricWordSpace(-25)).toBe(1.2)
-        expect(calculateLyricWordSpace(250)).toBe(1.6)
+        expect(calculateLyricWordSpace(250)).toBe(3.2)
         expect(calculateLyricWordSpace(Number.NaN)).toBe(1.2)
         expect(calculateLyricWordSpace(undefined)).toBe(1.2)
     })
